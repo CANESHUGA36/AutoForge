@@ -72,5 +72,6 @@ target/
 *.class
 
 # Misc
+workspace/
 *.bak
 *.orig

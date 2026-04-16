@@ -42,7 +42,9 @@ class Harness:
         self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS)
         self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS)
 
-        self.score_history = []
+        self.score_history: list[float] = []
+        # Parallel list: commit_history[i] == (round_num, hash) for score_history[i]
+        self.commit_history: list[tuple[int, str]] = []
 
     def _init_git(self):
         """初始化 git"""
@@ -121,12 +123,80 @@ class Harness:
 
         log.info("Max contract negotiation attempts reached")
 
+    def _get_head_hash(self) -> str | None:
+        """Return the current HEAD commit hash, or None if repo has no commits yet."""
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.workspace, capture_output=True, text=True
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def _commit_round(self, round_num: int) -> str | None:
+        """Guarantee a git snapshot after each build round, regardless of whether
+        the Builder remembered to commit.
+
+        Returns the HEAD commit hash after the operation (None if git has no commits)."""
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=self.workspace, capture_output=True, text=True
+        )
+        if not result.stdout.strip():
+            log.info(f"[git] Nothing to commit after round {round_num}")
+        else:
+            subprocess.run(["git", "add", "-A"], cwd=self.workspace, capture_output=True)
+            msg = f"harness: round {round_num} snapshot"
+            commit = subprocess.run(
+                ["git", "commit", "-m", msg],
+                cwd=self.workspace, capture_output=True, text=True
+            )
+            if commit.returncode == 0:
+                log.info(f"[git] Committed round {round_num} snapshot")
+            else:
+                log.warning(f"[git] Commit failed: {commit.stderr.strip()}")
+        return self._get_head_hash()
+
+    def _rollback_to(self, commit_hash: str, reason: str) -> None:
+        """Hard-reset workspace to a specific commit and log why."""
+        log.info(f"[git] Rolling back to {commit_hash[:8]} — {reason}")
+        result = subprocess.run(
+            ["git", "reset", "--hard", commit_hash],
+            cwd=self.workspace, capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            log.info("[git] Rollback successful")
+        else:
+            log.warning(f"[git] Rollback failed: {result.stderr.strip()}")
+
     def _build_round(self, round_num: int) -> float:
         """执行一轮 Build-Evaluate"""
+        # Rollback check: if the last round's score is below the historical best,
+        # reset the workspace to the best-known commit before the Builder starts.
+        rollback_msg = ""
+        if self.score_history and self.commit_history:
+            best_idx = max(range(len(self.score_history)), key=lambda i: self.score_history[i])
+            best_score = self.score_history[best_idx]
+            last_score = self.score_history[-1]
+            if last_score < best_score:
+                _, best_hash = self.commit_history[best_idx]
+                self._rollback_to(
+                    best_hash,
+                    f"score dropped {last_score:.1f} → best was {best_score:.1f} at round {best_idx + 1}"
+                )
+                rollback_msg = (
+                    f"\nNOTE: The workspace was rolled back to round {best_idx + 1} "
+                    f"(score {best_score:.1f}) because the last round regressed to {last_score:.1f}. "
+                    f"Build from this better baseline."
+                )
+
         # Build
         log.info("Build phase")
-        build_task = self._build_build_task(round_num)
+        build_task = self._build_build_task(round_num, rollback_msg)
         self.builder.run(build_task)
+
+        # Harness-level git snapshot — ensures history even if Builder skipped commit
+        head_hash = self._commit_round(round_num)
+        if head_hash:
+            self.commit_history.append((round_num, head_hash))
 
         # Evaluate
         log.info("Evaluate phase")
@@ -135,8 +205,11 @@ Evaluate the current code against acceptance criteria.
 
 1. Read {config.CONTRACT_FILE} for criteria
 2. Examine code files in the workspace
-3. Give a score and detailed feedback
-4. Save feedback to {config.FEEDBACK_FILE}
+3. If it's a web app, use run_bash to start the dev server (e.g. `npm run dev &`),
+   then call browser_test with url="http://localhost:5173" and relevant actions
+   to verify each functional criterion
+4. Give a score and detailed feedback
+5. Save feedback to {config.FEEDBACK_FILE}
 
 Include "SCORE: X/10" in your feedback.
 """
@@ -146,9 +219,9 @@ Include "SCORE: X/10" in your feedback.
 
         return score
 
-    def _build_build_task(self, round_num: int) -> str:
+    def _build_build_task(self, round_num: int, rollback_msg: str = "") -> str:
         """构建 Builder 任务"""
-        task = f"""Round {round_num} of building.
+        task = f"""Round {round_num} of building.{rollback_msg}
 
 Steps:
 1. Read {config.SPEC_FILE} for product spec
