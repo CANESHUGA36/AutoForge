@@ -1,0 +1,10 @@
+# Normalize line endings for cross-platform repos
+* text=auto
+
+# Shell scripts always LF
+*.sh text eol=lf
+
+# Windows scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

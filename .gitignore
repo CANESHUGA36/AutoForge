@@ -1,0 +1,76 @@
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / editors
+.idea/
+*.swp
+*.swo
+*~
+
+# VS Code (optional: remove below if you commit workspace settings)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.cache
+
+# Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+.next/
+out/
+.nuxt/
+coverage/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Java / Kotlin
+target/
+.gradle/
+*.class
+
+# Misc
+*.bak
+*.orig
