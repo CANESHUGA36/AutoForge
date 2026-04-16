@@ -1,5 +1,5 @@
 """
-Agent 实现 - 生产级（含上下文管理）
+Agent 实现 （含上下文管理）
 """
 from __future__ import annotations
 

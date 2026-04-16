@@ -1,5 +1,5 @@
 """
-工具实现 - 生产级
+工具实现
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import config
+from skills import get_skill_path
 
 try:
     from playwright.sync_api import sync_playwright

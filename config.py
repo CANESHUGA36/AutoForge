@@ -1,5 +1,5 @@
 """
-Harness 配置 - 生产级
+Harness 配置
 """
 import os
 from pathlib import Path
@@ -47,3 +47,4 @@ SPEC_FILE = "spec.md"
 FEEDBACK_FILE = "feedback.md"
 CONTRACT_FILE = "contract.md"
 PROGRESS_FILE = "progress.md"
+SPRINT_FILE = "sprint.md"

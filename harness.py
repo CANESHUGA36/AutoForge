@@ -12,13 +12,15 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import config
 from agents import Agent
 from prompts import (
     PLANNER_SYSTEM, BUILDER_SYSTEM, EVALUATOR_SYSTEM,
-    CONTRACT_BUILDER_SYSTEM, CONTRACT_REVIEWER_SYSTEM
+    CONTRACT_BUILDER_SYSTEM, CONTRACT_REVIEWER_SYSTEM,
+    SPRINT_PLANNER_SYSTEM
 )
 from tools import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
 
@@ -35,15 +37,18 @@ class Harness:
     def __init__(self, workspace: str):
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
+        # 同步到 config.WORKSPACE，确保 tools._resolve() 使用正确的工作目录
+        config.WORKSPACE = str(self.workspace.resolve())
         self._init_git()
 
-        # 创建三个 Agent
+        # 创建 Agent
         self.planner = Agent("Planner", PLANNER_SYSTEM, TOOL_SCHEMAS)
+        self.sprint_planner = Agent("SprintPlanner", SPRINT_PLANNER_SYSTEM, TOOL_SCHEMAS)
         self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS)
         self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS)
 
         self.score_history: list[float] = []
-        # Parallel list: commit_history[i] == (round_num, hash) for score_history[i]
+        # 与 score_history 下标严格对齐：commit_history[i] 对应第 i 轮的 (round_num, hash)
         self.commit_history: list[tuple[int, str]] = []
 
     def _init_git(self):
@@ -76,7 +81,8 @@ class Harness:
 
         spec_path = self.workspace / config.SPEC_FILE
         if not spec_path.exists():
-            return {"success": False, "error": "Planner failed to create spec"}
+            log.error("Planner failed to create spec.md — check if the model triggered write_file")
+            return {"success": False, "error": "Planner failed to create spec", "rounds": 0, "score": 0}
 
         log.info(f"Spec created successfully")
 
@@ -123,8 +129,38 @@ class Harness:
 
         log.info("Max contract negotiation attempts reached")
 
+    def _plan_sprint(self, round_num: int) -> None:
+        """在 Builder 启动前，由 Sprint Planner 生成本轮聚焦的任务清单（sprint.md）。"""
+        log.info("Sprint planning phase")
+        feedback_hint = ""
+        sprint_path = self.workspace / config.SPRINT_FILE
+        feedback_path = self.workspace / config.FEEDBACK_FILE
+
+        if sprint_path.exists():
+            feedback_hint += f"Read {config.SPRINT_FILE} to understand what was attempted last round.\n"
+        if feedback_path.exists():
+            feedback_hint += f"Read {config.FEEDBACK_FILE} to understand what issues were found.\n"
+
+        task = (
+            f"Plan sprint {round_num}.\n\n"
+            f"Steps:\n"
+            f"1. Read {config.SPEC_FILE} for the full feature list.\n"
+            f"2. Read {config.CONTRACT_FILE} for acceptance criteria.\n"
+            f"3. Use list_files to see what source files already exist.\n"
+        )
+        if feedback_hint:
+            task += feedback_hint
+        task += (
+            f"\nSelect 1-2 tasks for this round and save to {config.SPRINT_FILE}.\n"
+            f"Be specific and realistic — the Builder must finish them in one session."
+        )
+        self.sprint_planner.run(task)
+
+        if not sprint_path.exists():
+            log.warning("SprintPlanner did not create sprint.md, Builder will fall back to spec.md")
+
     def _get_head_hash(self) -> str | None:
-        """Return the current HEAD commit hash, or None if repo has no commits yet."""
+        """获取当前 HEAD 的 commit hash，若仓库尚无提交则返回 None。"""
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=self.workspace, capture_output=True, text=True
@@ -132,10 +168,9 @@ class Harness:
         return result.stdout.strip() if result.returncode == 0 else None
 
     def _commit_round(self, round_num: int) -> str | None:
-        """Guarantee a git snapshot after each build round, regardless of whether
-        the Builder remembered to commit.
+        """在每轮 Build 结束后强制做一次 git 快照，确保即使 Builder 忘记提交也有历史记录。
 
-        Returns the HEAD commit hash after the operation (None if git has no commits)."""
+        返回操作后的 HEAD commit hash；若仓库尚无提交则返回 None。"""
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=self.workspace, capture_output=True, text=True
@@ -156,7 +191,7 @@ class Harness:
         return self._get_head_hash()
 
     def _rollback_to(self, commit_hash: str, reason: str) -> None:
-        """Hard-reset workspace to a specific commit and log why."""
+        """将 workspace 硬重置到指定 commit，并记录回滚原因到日志。"""
         log.info(f"[git] Rolling back to {commit_hash[:8]} — {reason}")
         result = subprocess.run(
             ["git", "reset", "--hard", commit_hash],
@@ -169,8 +204,7 @@ class Harness:
 
     def _build_round(self, round_num: int) -> float:
         """执行一轮 Build-Evaluate"""
-        # Rollback check: if the last round's score is below the historical best,
-        # reset the workspace to the best-known commit before the Builder starts.
+        # 回滚检查：若上一轮分数低于历史最高分，在 Builder 启动前先恢复到最优版本。
         rollback_msg = ""
         if self.score_history and self.commit_history:
             best_idx = max(range(len(self.score_history)), key=lambda i: self.score_history[i])
@@ -188,12 +222,15 @@ class Harness:
                     f"Build from this better baseline."
                 )
 
+        # Sprint 规划：决定本轮 Builder 聚焦的 1-2 个任务
+        self._plan_sprint(round_num)
+
         # Build
         log.info("Build phase")
         build_task = self._build_build_task(round_num, rollback_msg)
         self.builder.run(build_task)
 
-        # Harness-level git snapshot — ensures history even if Builder skipped commit
+        # Harness 层兜底快照，确保即使 Builder 跳过提交也有版本记录
         head_hash = self._commit_round(round_num)
         if head_hash:
             self.commit_history.append((round_num, head_hash))
@@ -221,15 +258,25 @@ Include "SCORE: X/10" in your feedback.
 
     def _build_build_task(self, round_num: int, rollback_msg: str = "") -> str:
         """构建 Builder 任务"""
-        task = f"""Round {round_num} of building.{rollback_msg}
-
-Steps:
-1. Read {config.SPEC_FILE} for product spec
-2. Read {config.CONTRACT_FILE} for acceptance criteria
-"""
+        sprint_path = self.workspace / config.SPRINT_FILE
         feedback_path = self.workspace / config.FEEDBACK_FILE
+
+        # 优先读取 sprint.md，若不存在则回退到 spec.md
+        if sprint_path.exists():
+            primary_guide = (
+                f"1. Read {config.SPRINT_FILE} — this is your ONLY task list for this round.\n"
+                f"2. Read {config.CONTRACT_FILE} for acceptance criteria.\n"
+            )
+        else:
+            primary_guide = (
+                f"1. Read {config.SPEC_FILE} for product spec.\n"
+                f"2. Read {config.CONTRACT_FILE} for acceptance criteria.\n"
+            )
+
+        task = f"Round {round_num} of building.{rollback_msg}\n\nSteps:\n{primary_guide}"
+
         if feedback_path.exists() and round_num > 1:
-            task += f"3. Read {config.FEEDBACK_FILE} for previous feedback\n4. Address all issues\n"
+            task += f"3. Read {config.FEEDBACK_FILE} for previous feedback and address relevant issues.\n"
 
             if len(self.score_history) >= 2:
                 delta = self.score_history[-1] - self.score_history[-2]
@@ -257,13 +304,26 @@ Steps:
         return 0.0
 
 
+def _make_workspace(prompt: str) -> str:
+    """根据 prompt 和时间戳自动生成独立的工作目录路径。"""
+    slug = re.sub(r'[^\w\s-]', '', prompt.lower())
+    slug = re.sub(r'\s+', '-', slug.strip())[:30].rstrip('-')
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    return os.path.abspath(f"./projects/{slug}-{ts}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Harness - Multi-agent development")
     parser.add_argument("prompt", nargs="?", default="Build a Pomodoro timer with start, pause, reset buttons")
-    parser.add_argument("--workspace", default=config.WORKSPACE)
+    parser.add_argument("--workspace", default=None,
+                        help="工作目录路径。不指定时自动按 prompt+时间戳生成 ./projects/<slug>-<timestamp>/")
     args = parser.parse_args()
 
-    harness = Harness(args.workspace)
+    # 未手动指定 --workspace 时，自动生成带时间戳的独立目录
+    workspace = args.workspace if args.workspace else _make_workspace(args.prompt)
+    log.info(f"Workspace: {workspace}")
+
+    harness = Harness(workspace)
     result = harness.run(args.prompt)
 
     log.info("\n" + "="*60)
@@ -271,7 +331,9 @@ def main():
     log.info("="*60)
     log.info(f"Success: {result['success']}")
     log.info(f"Score: {result.get('score', 0)}")
-    log.info(f"Rounds: {result['rounds']}")
+    log.info(f"Rounds: {result.get('rounds', 0)}")
+    if "error" in result:
+        log.error(f"Error: {result['error']}")
 
     return 0 if result['success'] else 1
 

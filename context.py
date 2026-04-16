@@ -1,5 +1,5 @@
 """
-上下文生命周期管理 - 生产级
+上下文生命周期管理
 """
 from __future__ import annotations
 
