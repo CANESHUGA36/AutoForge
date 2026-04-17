@@ -1,0 +1,12 @@
+services:
+  autoforge:
+    build: .
+    # Loads OPENAI_API_KEY, OPENAI_BASE_URL, HARNESS_MODEL, etc. from .env file
+    env_file: .env
+    environment:
+      # Auto-generated workspaces go under this path (must match the volume mount target).
+      HARNESS_PROJECTS_DIR: /projects
+    volumes:
+      # Host ./projects  <->  Container /projects
+      # All generated apps appear in ./projects/ on your Windows machine.
+      - ./projects:/projects

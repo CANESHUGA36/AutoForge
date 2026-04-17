@@ -125,10 +125,12 @@ def list_files(directory: str = ".") -> str:
 
 def run_bash(command: str, timeout: int = 300) -> str:
     """执行 bash 命令"""
+    timeout = max(timeout, 300)  # enforce a minimum of 300s to handle slow npm/package installs
     try:
         result = subprocess.run(
             command, shell=True, cwd=config.WORKSPACE,
-            capture_output=True, text=True, timeout=timeout
+            capture_output=True, text=True, timeout=timeout,
+            **config.SUBPROCESS_TEXT_KWARGS,
         )
         output = _smart_truncate(result.stdout, result.stderr)
         if result.returncode != 0:
@@ -205,7 +207,7 @@ def delegate_task(task: str, role: str = "assistant") -> str:
             f"You are a sub-agent with role: {role}. "
             f"Complete the task and provide a concise summary."
         ),
-        use_tools=True
+        tools=TOOL_SCHEMAS
     )
 
     result = sub.run(task)

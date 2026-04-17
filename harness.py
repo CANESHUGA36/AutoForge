@@ -20,7 +20,8 @@ from agents import Agent
 from prompts import (
     PLANNER_SYSTEM, BUILDER_SYSTEM, EVALUATOR_SYSTEM,
     CONTRACT_BUILDER_SYSTEM, CONTRACT_REVIEWER_SYSTEM,
-    SPRINT_PLANNER_SYSTEM
+    SPRINT_PLANNER_SYSTEM,
+    SPRINT_CONTRACT_BUILDER_SYSTEM, SPRINT_CONTRACT_REVIEWER_SYSTEM,
 )
 from tools import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
 
@@ -159,11 +160,54 @@ class Harness:
         if not sprint_path.exists():
             log.warning("SprintPlanner did not create sprint.md, Builder will fall back to spec.md")
 
+    def _negotiate_sprint_contract(self, round_num: int) -> None:
+        """Negotiate a per-sprint acceptance contract between a dedicated contract writer and reviewer.
+
+        The contract is saved to SPRINT_CONTRACT_FILE and covers only the tasks in sprint.md for
+        this round, giving the Evaluator a focused, round-specific Definition of Done.
+        """
+        log.info("Sprint contract negotiation phase")
+
+        sprint_path = self.workspace / config.SPRINT_FILE
+        if not sprint_path.exists():
+            log.warning("sprint.md not found — skipping per-sprint contract negotiation")
+            return
+
+        writer = Agent("SprintContractWriter", SPRINT_CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS)
+        reviewer = Agent("SprintContractReviewer", SPRINT_CONTRACT_REVIEWER_SYSTEM, TOOL_SCHEMAS)
+
+        for attempt in range(3):
+            log.info(f"Sprint contract negotiation attempt {attempt + 1}/3")
+
+            writer.run(
+                f"Round {round_num}: Read {config.SPRINT_FILE} and {config.CONTRACT_FILE}, "
+                f"then write the sprint contract to {config.SPRINT_CONTRACT_FILE}."
+            )
+
+            sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
+            if not sprint_contract_path.exists():
+                log.warning("SprintContractWriter did not create sprint_contract.md")
+                continue
+
+            review = reviewer.run(
+                f"Review {config.SPRINT_CONTRACT_FILE} against {config.SPRINT_FILE}. "
+                f"Reply APPROVED or list issues."
+            )
+
+            if "APPROVED" in review:
+                log.info(f"Sprint contract approved on attempt {attempt + 1}")
+                return
+
+            log.info(f"Sprint contract review feedback: {review[:200]}...")
+
+        log.info("Sprint contract negotiation max attempts reached — using last written version")
+
     def _get_head_hash(self) -> str | None:
         """获取当前 HEAD 的 commit hash，若仓库尚无提交则返回 None。"""
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=self.workspace, capture_output=True, text=True
+            cwd=self.workspace, capture_output=True, text=True,
+            **config.SUBPROCESS_TEXT_KWARGS,
         )
         return result.stdout.strip() if result.returncode == 0 else None
 
@@ -173,7 +217,8 @@ class Harness:
         返回操作后的 HEAD commit hash；若仓库尚无提交则返回 None。"""
         result = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=self.workspace, capture_output=True, text=True
+            cwd=self.workspace, capture_output=True, text=True,
+            **config.SUBPROCESS_TEXT_KWARGS,
         )
         if not result.stdout.strip():
             log.info(f"[git] Nothing to commit after round {round_num}")
@@ -182,7 +227,8 @@ class Harness:
             msg = f"harness: round {round_num} snapshot"
             commit = subprocess.run(
                 ["git", "commit", "-m", msg],
-                cwd=self.workspace, capture_output=True, text=True
+                cwd=self.workspace, capture_output=True, text=True,
+                **config.SUBPROCESS_TEXT_KWARGS,
             )
             if commit.returncode == 0:
                 log.info(f"[git] Committed round {round_num} snapshot")
@@ -195,7 +241,8 @@ class Harness:
         log.info(f"[git] Rolling back to {commit_hash[:8]} — {reason}")
         result = subprocess.run(
             ["git", "reset", "--hard", commit_hash],
-            cwd=self.workspace, capture_output=True, text=True
+            cwd=self.workspace, capture_output=True, text=True,
+            **config.SUBPROCESS_TEXT_KWARGS,
         )
         if result.returncode == 0:
             log.info("[git] Rollback successful")
@@ -225,6 +272,9 @@ class Harness:
         # Sprint 规划：决定本轮 Builder 聚焦的 1-2 个任务
         self._plan_sprint(round_num)
 
+        # Per-sprint contract: negotiate a focused Definition of Done for this round only
+        self._negotiate_sprint_contract(round_num)
+
         # Build
         log.info("Build phase")
         build_task = self._build_build_task(round_num, rollback_msg)
@@ -235,16 +285,23 @@ class Harness:
         if head_hash:
             self.commit_history.append((round_num, head_hash))
 
-        # Evaluate
+        # Evaluate — use per-sprint contract when available, otherwise fall back to global contract
         log.info("Evaluate phase")
-        eval_task = f"""
-Evaluate the current code against acceptance criteria.
+        sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
+        if sprint_contract_path.exists():
+            criteria_instruction = (
+                f"1. Read {config.SPRINT_CONTRACT_FILE} — this is the PRIMARY criteria for this round.\n"
+                f"   Also read {config.CONTRACT_FILE} for broader quality standards.\n"
+            )
+        else:
+            criteria_instruction = f"1. Read {config.CONTRACT_FILE} for criteria.\n"
 
-1. Read {config.CONTRACT_FILE} for criteria
-2. Examine code files in the workspace
+        eval_task = f"""Evaluate the current code against acceptance criteria.
+
+{criteria_instruction}2. Examine code files in the workspace
 3. If it's a web app, use run_bash to start the dev server (e.g. `npm run dev &`),
    then call browser_test with url="http://localhost:5173" and relevant actions
-   to verify each functional criterion
+   to verify each criterion from the sprint contract
 4. Give a score and detailed feedback
 5. Save feedback to {config.FEEDBACK_FILE}
 
@@ -280,21 +337,29 @@ Include "SCORE: X/10" in your feedback.
         return score
 
     def _build_build_task(self, round_num: int, rollback_msg: str = "") -> str:
-        """构建 Builder 任务"""
+        """Build the task prompt for the Builder agent."""
         sprint_path = self.workspace / config.SPRINT_FILE
+        sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
         feedback_path = self.workspace / config.FEEDBACK_FILE
 
-        # 优先读取 sprint.md，若不存在则回退到 spec.md
+        # Primary guide: prefer sprint.md; fall back to spec.md
         if sprint_path.exists():
             primary_guide = (
                 f"1. Read {config.SPRINT_FILE} — this is your ONLY task list for this round.\n"
-                f"2. Read {config.CONTRACT_FILE} for acceptance criteria.\n"
             )
         else:
             primary_guide = (
                 f"1. Read {config.SPEC_FILE} for product spec.\n"
-                f"2. Read {config.CONTRACT_FILE} for acceptance criteria.\n"
             )
+
+        # Use per-sprint contract when available; fall back to global contract
+        if sprint_contract_path.exists():
+            primary_guide += (
+                f"2. Read {config.SPRINT_CONTRACT_FILE} — this is the Definition of Done for THIS round.\n"
+                f"   (You may also read {config.CONTRACT_FILE} for broader context.)\n"
+            )
+        else:
+            primary_guide += f"2. Read {config.CONTRACT_FILE} for acceptance criteria.\n"
 
         task = f"Round {round_num} of building.{rollback_msg}\n\nSteps:\n{primary_guide}"
 
@@ -363,14 +428,15 @@ def _make_workspace(prompt: str) -> str:
     slug = re.sub(r'[^\w\s-]', '', prompt.lower())
     slug = re.sub(r'\s+', '-', slug.strip())[:30].rstrip('-')
     ts = time.strftime("%Y%m%d-%H%M%S")
-    return os.path.abspath(f"./projects/{slug}-{ts}")
+    # Use PROJECTS_DIR so Docker (HARNESS_PROJECTS_DIR=/projects) writes into the bind mount.
+    return str(Path(config.PROJECTS_DIR) / f"{slug}-{ts}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Harness - Multi-agent development")
     parser.add_argument("prompt", nargs="?", default="Build a Pomodoro timer with start, pause, reset buttons")
     parser.add_argument("--workspace", default=None,
-                        help="工作目录路径。不指定时自动按 prompt+时间戳生成 ./projects/<slug>-<timestamp>/")
+                        help="工作目录路径。不指定时在 PROJECTS_DIR（默认 ./projects，Docker 为 /projects）下生成 <slug>-<timestamp>/")
     args = parser.parse_args()
 
     # 未手动指定 --workspace 时，自动生成带时间戳的独立目录

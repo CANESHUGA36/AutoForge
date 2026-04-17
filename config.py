@@ -53,8 +53,18 @@ MAX_TOOL_ERRORS = 5
 
 # 路径
 WORKSPACE = os.path.abspath(os.environ.get("HARNESS_WORKSPACE", "./workspace"))
+
+# Parent directory for auto-generated per-run workspaces when harness.py is run without
+# --workspace. Default ./projects; in Docker set HARNESS_PROJECTS_DIR=/projects to match
+# the volume mount (./projects:/projects).
+PROJECTS_DIR = os.path.abspath(os.environ.get("HARNESS_PROJECTS_DIR", "./projects"))
+
 SPEC_FILE = "spec.md"
 FEEDBACK_FILE = "feedback.md"
 CONTRACT_FILE = "contract.md"
+SPRINT_CONTRACT_FILE = "sprint_contract.md"
 PROGRESS_FILE = "progress.md"
 SPRINT_FILE = "sprint.md"
+
+# Use UTF-8 for subprocess text mode; Windows default (e.g. cp936) breaks on UTF-8 bytes from npm/node/git.
+SUBPROCESS_TEXT_KWARGS = {"encoding": "utf-8", "errors": "replace"}

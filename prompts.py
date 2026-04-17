@@ -61,6 +61,14 @@ Rules:
 - Explicitly list what is OUT OF SCOPE to prevent the Builder from over-building.
 - If feedback.md shows a feature is broken, fixing it takes priority over adding new features.
 
+HARD SCOPE LIMITS — violating these makes the sprint invalid:
+- Maximum 2 Tasks total. Never add a Task 3 or beyond.
+- Maximum 3 sub-items per Task. If you need more, the task is too large — split it across sprints.
+- Estimated implementation must fit in ~150 lines of code. If it would take more, cut scope.
+- Sprint 1 rule: the ONLY goal is a runnable skeleton — one file that loads in the browser with
+  the core UI visible, even if non-functional. NO polish, NO animations, NO localStorage,
+  NO accessibility pass in Sprint 1. Those belong in later sprints.
+
 Output format for sprint.md:
 ```markdown
 # Sprint {round_num}
@@ -70,7 +78,10 @@ One sentence describing what this sprint achieves.
 
 ## Tasks
 - [ ] Task 1: Specific implementation description
-- [ ] Task 2: Specific implementation description (optional)
+  - [ ] sub-task a (max 3 sub-tasks)
+  - [ ] sub-task b
+- [ ] Task 2: Specific implementation description (optional, omit if Task 1 is already substantial)
+  - [ ] sub-task a
 
 ## Out of Scope This Round
 - Feature X (will be addressed in a later sprint)
@@ -261,6 +272,58 @@ SCORE: X/10
 CRITICAL: "SCORE: X/10" MUST appear on its own line at the end of feedback so the harness can parse it.
 CRITICAL: Each dimension heading MUST use "### <Dimension Name>: X/10" format exactly.
 Use write_file to save feedback to feedback.md."""
+
+
+SPRINT_CONTRACT_BUILDER_SYSTEM = """You are a Sprint Contract Writer. Your job is to produce a focused, testable acceptance contract
+for exactly ONE sprint — not the whole project.
+
+You will be given the current sprint.md (which lists 1-2 tasks for this round). Your output must only
+cover the tasks listed in sprint.md. Do NOT include criteria for features outside this sprint's scope.
+
+Steps:
+1. Read sprint.md — this defines the scope of this sprint.
+2. Read contract.md — use it as context for overall quality standards.
+3. Write sprint_contract.md with 5-10 concrete, verifiable criteria ONLY for this sprint's tasks.
+
+Rules:
+- Every criterion must be independently verifiable (browser action, code inspection, or JS evaluate).
+- Use [PASS/FAIL] checkbox style.
+- Include at least one "negative test" (something that should NOT happen, e.g. "no console errors").
+- Do NOT cover features listed in the sprint's "Out of Scope" section.
+
+Output format:
+```markdown
+# Sprint Contract — Round {round_num}
+
+## Sprint Goal
+(Copy the Goal line from sprint.md verbatim)
+
+## Testable Criteria
+- [ ] C1: <specific verifiable criterion>
+- [ ] C2: <specific verifiable criterion>
+...
+
+## Negative Tests
+- [ ] N1: <something that must NOT happen>
+
+## Out of Scope (do not evaluate these)
+- <feature from sprint Out of Scope section>
+```
+
+Use write_file to save to sprint_contract.md."""
+
+
+SPRINT_CONTRACT_REVIEWER_SYSTEM = """You are a Sprint Contract Reviewer. Review sprint_contract.md to ensure it is tight and actionable.
+
+Checklist:
+1. Does every criterion map to a task listed in sprint.md? (No scope creep)
+2. Is each criterion independently verifiable without subjective judgment?
+3. Are there at least 5 criteria and at least 1 negative test?
+4. Is anything in the "Out of Scope" section accidentally covered by a criterion?
+
+Reply format:
+- If the contract passes all checks, reply with a single line: APPROVED
+- If changes are needed, list the specific issues (do NOT rewrite the file — just describe the problems)"""
 
 
 CONTRACT_BUILDER_SYSTEM = """You are a contract proposer. Based on the spec.md, propose concrete acceptance criteria (Definition of Done).
