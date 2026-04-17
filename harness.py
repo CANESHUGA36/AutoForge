@@ -252,8 +252,31 @@ Include "SCORE: X/10" in your feedback.
 """
         eval_result = self.evaluator.run(eval_task)
         score = self._parse_score(eval_result)
-        log.info(f"Round score: {score}/10")
 
+        # Parse per-dimension scores and log them
+        dim_scores = self._parse_dimension_scores(eval_result)
+        if dim_scores:
+            for dim, s in sorted(dim_scores.items()):
+                threshold = config.DIMENSION_THRESHOLDS.get(dim, 0)
+                status = "OK" if s >= threshold else "FAIL"
+                log.info(f"  [{status}] {dim}: {s}/10 (threshold {threshold})")
+        else:
+            log.warning("Could not parse per-dimension scores from evaluator feedback")
+
+        # Hard threshold check: if any dimension is below its threshold, force the round
+        # to fail even if the overall score is above PASS_THRESHOLD.
+        failed_dims = self._check_dimension_thresholds(dim_scores)
+        if failed_dims:
+            log.warning(f"Hard threshold(s) failed: {', '.join(failed_dims)}")
+            # Cap the effective score just below the pass threshold so the loop continues
+            if score >= config.PASS_THRESHOLD:
+                log.warning(
+                    f"Overall score {score} would have passed, but dimension hard threshold "
+                    f"forces continuation. Effective score capped to {config.PASS_THRESHOLD - 0.1}."
+                )
+                score = config.PASS_THRESHOLD - 0.1
+
+        log.info(f"Round score: {score}/10")
         return score
 
     def _build_build_task(self, round_num: int, rollback_msg: str = "") -> str:
@@ -291,7 +314,7 @@ Include "SCORE: X/10" in your feedback.
         return task
 
     def _parse_score(self, text: str) -> float:
-        """解析分数"""
+        """Parse the overall SCORE: X/10 from evaluator feedback."""
         patterns = [
             r'SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*10',
             r'Score:\s*(\d+(?:\.\d+)?)\s*/\s*10',
@@ -302,6 +325,37 @@ Include "SCORE: X/10" in your feedback.
                 return float(match.group(1))
         log.warning("Could not parse score, defaulting to 0")
         return 0.0
+
+    def _parse_dimension_scores(self, text: str) -> dict:
+        """Parse per-dimension scores from '### Dimension Name: X/10' headings."""
+        # Canonical name mapping: raw heading text -> config key
+        _name_map = {
+            "design quality": "design_quality",
+            "design_quality": "design_quality",
+            "originality":    "originality",
+            "craft":          "craft",
+            "functionality":  "functionality",
+        }
+        scores: dict = {}
+        pattern = r'###\s*([\w\s]+?):\s*(\d+(?:\.\d+)?)\s*/\s*10'
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            raw = match.group(1).strip().lower()
+            key = _name_map.get(raw)
+            if key:
+                scores[key] = float(match.group(2))
+        return scores
+
+    def _check_dimension_thresholds(self, dim_scores: dict) -> list:
+        """Return list of human-readable failure strings for dimensions below hard thresholds.
+
+        Also checks for explicit DIMENSION_FAIL markers written by the Evaluator.
+        """
+        failed = []
+        for dim, threshold in config.DIMENSION_THRESHOLDS.items():
+            score = dim_scores.get(dim)
+            if score is not None and score < threshold:
+                failed.append(f"{dim}={score:.1f} (threshold {threshold:.1f})")
+        return failed
 
 
 def _make_workspace(prompt: str) -> str:

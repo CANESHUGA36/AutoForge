@@ -37,6 +37,16 @@ RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "150000"))
 MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "5"))
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
+# Per-dimension hard thresholds — if any dimension scores below its threshold,
+# the sprint is forced to fail regardless of the overall score.
+# Keys must match the canonical names returned by Harness._parse_dimension_scores().
+DIMENSION_THRESHOLDS: dict = {
+    "functionality":  float(os.environ.get("THRESHOLD_FUNCTIONALITY",  "5.0")),
+    "design_quality": float(os.environ.get("THRESHOLD_DESIGN_QUALITY", "4.0")),
+    "originality":    float(os.environ.get("THRESHOLD_ORIGINALITY",    "3.0")),
+    "craft":          float(os.environ.get("THRESHOLD_CRAFT",          "3.0")),
+}
+
 # Agent 限制
 MAX_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "80"))
 MAX_TOOL_ERRORS = 5
