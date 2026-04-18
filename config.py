@@ -65,6 +65,7 @@ CONTRACT_FILE = "contract.md"
 SPRINT_CONTRACT_FILE = "sprint_contract.md"
 PROGRESS_FILE = "progress.md"
 SPRINT_FILE = "sprint.md"
+STATE_FILE = "harness_state.json"
 
 # Use UTF-8 for subprocess text mode; Windows default (e.g. cp936) breaks on UTF-8 bytes from npm/node/git.
 SUBPROCESS_TEXT_KWARGS = {"encoding": "utf-8", "errors": "replace"}

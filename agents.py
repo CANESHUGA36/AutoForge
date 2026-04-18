@@ -26,13 +26,27 @@ class Agent:
         self.tools = tools
 
     def run(self, user_prompt: str) -> str:
-        """运行 Agent"""
+        """Run the agent and return the final text response.
+
+        Preserves the original interface; token usage is tracked internally but not returned.
+        """
+        text, _ = self.run_with_stats(user_prompt)
+        return text
+
+    def run_with_stats(self, user_prompt: str) -> tuple[str, dict]:
+        """Run the agent and return (final_text, usage_dict).
+
+        usage_dict has keys "prompt" (int) and "completion" (int) with cumulative token counts
+        across all LLM calls made during this invocation.
+        """
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_prompt}
         ]
 
         log.info(f"Agent '{self.name}' starting")
+
+        usage: dict[str, int] = {"prompt": 0, "completion": 0}
 
         for iteration in range(1, config.MAX_ITERATIONS + 1):
             # 上下文生命周期检查
@@ -46,7 +60,12 @@ class Agent:
                 )
             except Exception as e:
                 log.error(f"LLM call failed: {e}")
-                return f"[error] LLM call failed: {e}"
+                return f"[error] LLM call failed: {e}", usage
+
+            # Accumulate token usage when the API returns it
+            if response.usage:
+                usage["prompt"] += response.usage.prompt_tokens or 0
+                usage["completion"] += response.usage.completion_tokens or 0
 
             message = response.choices[0].message
 
@@ -60,7 +79,7 @@ class Agent:
             })
 
             if not message.tool_calls:
-                return message.content or "Done"
+                return message.content or "Done", usage
 
             for tool_call in message.tool_calls:
                 name = tool_call.function.name
@@ -75,7 +94,7 @@ class Agent:
                     "content": result
                 })
 
-        return "[error] Max iterations reached"
+        return "[error] Max iterations reached", usage
 
     def _check_context_lifecycle(self, messages: list[dict]) -> list[dict]:
         """检查并管理上下文生命周期"""

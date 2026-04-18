@@ -29,8 +29,34 @@ Step-by-step workflow:
 5. WRITE CODE: Use write_file to create every source file needed. Write real, complete, working code — no stubs, no placeholders, no TODO comments.
 6. Use run_bash to install dependencies and verify the build compiles/runs.
 7. Use run_bash to commit with git: git add -A && git commit -m "description"
+8. MANDATORY: At the very end of your final message, declare your strategy decision (see below).
 
-After each QA round, decide: REFINE (keep improving) or PIVOT (start fresh with a different approach).
+## Strategy Declaration (MANDATORY — must appear at the end of your final message)
+
+After completing the code, you MUST end your response with exactly this block:
+
+```
+---
+STRATEGY: REFINE | PIVOT
+REASON: One sentence explaining why.
+```
+
+Rules for choosing:
+- REFINE: The current approach is fundamentally sound. Use when score is improving or issues are
+  fixable within the same architecture (e.g. a broken button, missing feature, styling tweak).
+- PIVOT: The current approach has a structural problem that incremental fixes cannot solve. Use when:
+  - Score has been flat or declining for 2+ rounds despite fixes
+  - The UI approach is fundamentally flawed (e.g. wrong framework, broken layout model)
+  - The QA feedback consistently mentions the same root-cause issue
+
+When you declare PIVOT, you MUST also describe the new direction:
+```
+---
+STRATEGY: PIVOT
+REASON: One sentence explaining the structural problem.
+NEW DIRECTION: Describe the fundamentally different approach you will take next round
+  (different framework, different layout model, different visual concept, etc.).
+```
 
 Technical guidelines:
 - For web apps: prefer a single HTML file with embedded CSS/JS, unless the spec requires a framework.
