@@ -26,6 +26,8 @@ _load_dotenv()
 
 # API 配置
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
+# Image generation (MiniMax image-01); falls back to chat key when unset.
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "") or API_KEY
 BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
 

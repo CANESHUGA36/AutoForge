@@ -3,12 +3,15 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import subprocess
 import time
 from pathlib import Path
+
+import requests
 
 import config
 from skills import get_skill_path
@@ -195,6 +198,64 @@ def _smart_truncate(stdout: str, stderr: str, limit: int = 30_000) -> str:
     if stderr:
         return truncated_stdout + "\n\n--- STDERR ---\n" + stderr
     return truncated_stdout
+
+
+def generate_image(
+    prompt: str,
+    path: str,
+    aspect_ratio: str = "16:9",
+) -> str:
+    """Call MiniMax image-01 API and save JPEG bytes to the workspace."""
+    try:
+        api_key = (config.MINIMAX_API_KEY or "").strip()
+        if not api_key:
+            return "[error] MINIMAX_API_KEY not set (or OPENAI_API_KEY empty); add a key in .env"
+
+        if not prompt or not prompt.strip():
+            return "[error] prompt is required"
+        if not path or not path.strip():
+            return "[error] path is required"
+
+        url = "https://api.minimax.io/v1/image_generation"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "image-01",
+            "prompt": prompt.strip(),
+            "aspect_ratio": aspect_ratio,
+            "response_format": "base64",
+            "n": 1,
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        try:
+            data = response.json()
+        except Exception:
+            return f"[error] Non-JSON response (HTTP {response.status_code}): {response.text[:800]}"
+
+        if response.status_code >= 400:
+            err = data.get("message") or data.get("error") or data
+            return f"[error] HTTP {response.status_code}: {err}"
+
+        inner = data.get("data") or {}
+        b64_list = inner.get("image_base64")
+        if not b64_list or not isinstance(b64_list, list):
+            return f"[error] Unexpected API response: {str(data)[:1200]}"
+
+        raw = base64.b64decode(b64_list[0])
+        p = _resolve(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(raw)
+
+        hint = ""
+        low = path.lower()
+        if low.endswith(".png"):
+            hint = " Note: output is JPEG; use .jpg/.jpeg in path for correct MIME type."
+
+        return f"Generated image saved to {path} ({len(raw)} bytes).{hint}"
+    except Exception as e:
+        return f"[error] {e}"
 
 
 def delegate_task(task: str, role: str = "assistant") -> str:
@@ -390,6 +451,37 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate an image with MiniMax image-01 and save it under the workspace. "
+                "Use for hero banners, icons, backgrounds, sprites, avatars, etc. "
+                "Write detailed prompts (subject, art style, lighting, color palette, mood). "
+                "API returns JPEG bytes; prefer path ending in .jpg or .jpeg."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Image prompt in English or Chinese (subject, style, lighting, colors).",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path, e.g. assets/hero.jpg or public/logo.jpeg",
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "description": "Aspect ratio such as 1:1, 16:9, 9:16, 4:3, 3:2, 2:3",
+                        "default": "16:9",
+                    },
+                },
+                "required": ["prompt", "path"],
+            },
+        },
+    },
 ]
 
 BROWSER_TOOL_SCHEMAS = [
@@ -420,6 +512,7 @@ TOOL_DISPATCH = {
     "run_bash": run_bash,
     "browser_test": browser_test,
     "read_skill_file": read_skill_file,
+    "generate_image": generate_image,
 }
 
 

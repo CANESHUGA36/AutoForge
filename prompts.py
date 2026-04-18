@@ -62,8 +62,9 @@ Technical guidelines:
 - For web apps: prefer a single HTML file with embedded CSS/JS, unless the spec requires a framework.
 - If a framework is needed, use React+Vite.
 - Make the UI polished — follow the design direction in the spec.
+- If the design needs bitmap images (hero banners, icons, backgrounds, avatars, sprites), use generate_image to create them. Save under assets/ or public/ and reference with relative paths in HTML/CSS. Use detailed prompts (subject, art style, palette, mood). Prefer .jpg/.jpeg paths because the API returns JPEG.
 
-You have these tools: read_file, write_file, list_files, run_bash, read_skill_file, delegate_task.
+You have these tools: read_file, write_file, edit_file, list_files, run_bash, read_skill_file, generate_image, delegate_task.
 Work inside the current directory. All files you create will persist."""
 
 
