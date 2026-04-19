@@ -50,7 +50,7 @@ def read_file(path: str) -> str:
         if not p.exists():
             return f"[error] File not found: {path}"
         content = p.read_text(encoding="utf-8", errors="replace")
-        limit = 60_000
+        limit = 30_000
         if len(content) > limit:
             total = len(content)
             content = content[:limit] + (
@@ -126,9 +126,9 @@ def list_files(directory: str = ".") -> str:
         return f"[error] {e}"
 
 
-def run_bash(command: str, timeout: int = 300) -> str:
+def run_bash(command: str, timeout: int = 900) -> str:
     """执行 bash 命令"""
-    timeout = max(timeout, 300)  # enforce a minimum of 300s to handle slow npm/package installs
+    timeout = max(timeout, 900)  # enforce a minimum of 900s to handle slow npm/package installs
     try:
         result = subprocess.run(
             command, shell=True, cwd=config.WORKSPACE,
@@ -145,7 +145,7 @@ def run_bash(command: str, timeout: int = 300) -> str:
         return f"[error] {e}"
 
 
-def _smart_truncate(stdout: str, stderr: str, limit: int = 30_000) -> str:
+def _smart_truncate(stdout: str, stderr: str, limit: int = 10_000) -> str:
     """智能截断输出"""
     stderr = (stderr or "").strip()
     stdout = (stdout or "").strip()
@@ -259,15 +259,30 @@ def generate_image(
 
 
 def delegate_task(task: str, role: str = "assistant") -> str:
-    """委派任务给子 Agent"""
+    """委派任务给子 Agent —— 核心上下文隔离机制。
+
+    子 Agent 拥有独立的 messages 列表，其工具调用历史不会污染父 Agent 的上下文。
+    这是防止 Builder 上下文爆炸的关键机制。
+    """
     from agents import Agent
+    from prompts import COMPONENT_BUILDER_SYSTEM
+
+    # 根据 role 选择专业化 system prompt
+    _role_prompts = {
+        "component_builder": COMPONENT_BUILDER_SYSTEM,
+    }
+
+    if role in _role_prompts:
+        system_prompt = _role_prompts[role]
+    else:
+        system_prompt = (
+            f"You are a sub-agent with role: {role}. "
+            f"Complete the task and provide a concise summary."
+        )
 
     sub = Agent(
         name=f"sub_{role}",
-        system_prompt=(
-            f"You are a sub-agent with role: {role}. "
-            f"Complete the task and provide a concise summary."
-        ),
+        system_prompt=system_prompt,
         tools=TOOL_SCHEMAS
     )
 
@@ -288,12 +303,15 @@ def browser_test(
     start_command: str | None = None,
     port: int = 5173,
     startup_wait: int = 8,
+    viewport: dict | None = None,
 ) -> str:
-    """浏览器测试"""
+    """Browser test with configurable viewport. Default viewport is 1280x720 (desktop).
+    Pass viewport={"width": 375, "height": 812} for mobile testing."""
     if not HAS_PLAYWRIGHT:
         return "[error] Playwright not installed"
 
-    report_lines = []
+    vp = viewport if isinstance(viewport, dict) else {"width": 1280, "height": 720}
+    report_lines = [f"Viewport: {vp['width']}x{vp['height']}"]
 
     if start_command:
         global _dev_server_proc
@@ -308,7 +326,7 @@ def browser_test(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page = browser.new_page(viewport=vp)
 
             try:
                 page.goto(url, timeout=15000)
@@ -355,15 +373,19 @@ def browser_test(
                     report_lines.append(f"  - {err[:200]}")
 
             if screenshot:
-                ss_path = Path(config.WORKSPACE) / "_screenshot.png"
+                ss_name = f"_screenshot_{vp['width']}x{vp['height']}.png"
+                ss_path = Path(config.WORKSPACE) / ss_name
                 page.screenshot(path=str(ss_path), full_page=False)
-                report_lines.append(f"Screenshot saved to _screenshot.png")
+                report_lines.append(f"Screenshot saved to {ss_name}")
 
             browser.close()
     except Exception as e:
         report_lines.append(f"[error] Browser test failed: {e}")
 
-    return "\n".join(report_lines)
+    result = "\n".join(report_lines)
+    if len(result) > 10_000:
+        result = result[:10_000] + "\n...[TRUNCATED: browser test report exceeded 10K chars]"
+    return result
 
 
 # 工具 Schemas
@@ -431,7 +453,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
-                    "timeout": {"type": "integer", "default": 300}
+                    "timeout": {"type": "integer", "default": 900}
                 },
                 "required": ["command"]
             }
@@ -489,14 +511,34 @@ BROWSER_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "browser_test",
-            "description": "Test the app in a headless browser",
+            "description": (
+                "Test the app in a headless Chromium browser. "
+                "Call twice for web apps: once with default viewport (desktop 1280x720) "
+                "and once with viewport={\"width\": 375, \"height\": 812} for mobile. "
+                "For each call, provide one action per functional criterion to verify."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string"},
-                    "actions": {"type": "array"},
+                    "actions": {
+                        "type": "array",
+                        "description": (
+                            "List of actions. Each action is an object with 'type' "
+                            "(click|fill|wait|evaluate|scroll), optional 'selector', 'value', 'delay'. "
+                            "Use evaluate to run JS and capture return values."
+                        ),
+                    },
                     "screenshot": {"type": "boolean", "default": True},
-                    "start_command": {"type": "string"}
+                    "start_command": {"type": "string"},
+                    "viewport": {
+                        "type": "object",
+                        "description": "Browser viewport size. Default: {\"width\": 1280, \"height\": 720}. Use {\"width\": 375, \"height\": 812} for mobile.",
+                        "properties": {
+                            "width": {"type": "integer"},
+                            "height": {"type": "integer"},
+                        },
+                    },
                 },
                 "required": ["url"]
             }

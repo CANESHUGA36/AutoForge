@@ -12,13 +12,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Node.js 20 LTS ---
-# Sets npm mirror globally inside the image so all npm/npx commands
-# use npmmirror by default (fast in China, harmless elsewhere).
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+# --- Node.js + npm (Debian packages) ---
+# Avoid NodeSource curl+TLS in CI/Docker (can fail with SSL EOF); Debian's nodejs
+# package does not always pull in npm, so install both explicitly.
+# Sets npm mirror globally so npm/npx use npmmirror by default (fast in China).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nodejs \
+        npm \
     && rm -rf /var/lib/apt/lists/* \
     && npm config set registry https://registry.npmmirror.com
+
+# --- Pre-install common dev servers (used by single-file HTML projects) ---
+RUN npm install -g serve http-server
 
 # --- Python packages ---
 COPY requirements.txt .

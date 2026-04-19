@@ -45,10 +45,19 @@ class Agent:
         ]
 
         log.info(f"Agent '{self.name}' starting")
+        import time
+        start_time = time.time()
+        AGENT_TIME_LIMIT_S = 3600  # 1 hour hard cap per agent invocation
 
         usage: dict[str, int] = {"prompt": 0, "completion": 0}
 
         for iteration in range(1, config.MAX_ITERATIONS + 1):
+            # 全局时间上限检查 —— 防止工具阻塞或死循环导致单轮运行数小时
+            elapsed = time.time() - start_time
+            if elapsed > AGENT_TIME_LIMIT_S:
+                log.error(f"Agent '{self.name}' exceeded {AGENT_TIME_LIMIT_S}s time limit ({elapsed:.0f}s elapsed). Aborting.")
+                return f"[error] Agent exceeded {AGENT_TIME_LIMIT_S}s time limit", usage
+
             # 上下文生命周期检查
             messages = self._check_context_lifecycle(messages)
 

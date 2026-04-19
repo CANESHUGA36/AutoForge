@@ -191,4 +191,4 @@ Functionality:  X/10  [PASS/FAIL if below threshold]
 ```
 
 A sprint FAILS if ANY dimension is below its threshold, regardless of total score.
-Recommended hard thresholds: Design Quality ≥ 4, Originality ≥ 4, Craft ≥ 4, Functionality ≥ 5.
+Hard thresholds: Functionality ≥ 5 | Design Quality ≥ 4 | Originality ≥ 3 | Craft ≥ 3

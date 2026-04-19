@@ -23,6 +23,7 @@ from prompts import (
     CONTRACT_BUILDER_SYSTEM, CONTRACT_REVIEWER_SYSTEM,
     SPRINT_PLANNER_SYSTEM,
     SPRINT_CONTRACT_BUILDER_SYSTEM, SPRINT_CONTRACT_REVIEWER_SYSTEM,
+    CODE_REVIEWER_SYSTEM, BROWSER_TESTER_SYSTEM,
 )
 from tools import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
 
@@ -42,6 +43,7 @@ class Harness:
         # 同步到 config.WORKSPACE，确保 tools._resolve() 使用正确的工作目录
         config.WORKSPACE = str(self.workspace.resolve())
         self._init_git()
+        self._setup_file_logging()
 
         # 创建 Agent
         self.planner = Agent("Planner", PLANNER_SYSTEM, TOOL_SCHEMAS)
@@ -49,7 +51,9 @@ class Harness:
         self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS)
         self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS)
 
-        self.score_history: list[float] = []
+        self.score_history: list[float] = []          # 保留兼容旧 state
+        self.sprint_score_history: list[float] = []     # 本轮 Sprint 质量（基于 sprint_contract）
+        self.overall_score_history: list[float] = []    # 全局质量（基于 contract.md，加权计算）
         # 与 score_history 下标严格对齐：commit_history[i] 对应第 i 轮的 (round_num, hash)
         self.commit_history: list[tuple[int, str]] = []
 
@@ -86,6 +90,8 @@ class Harness:
         state = {
             "completed_rounds": self._completed_rounds,
             "score_history": self.score_history,
+            "sprint_score_history": self.sprint_score_history,
+            "overall_score_history": self.overall_score_history,
             # commit_history entries are (round_num, hash) tuples — serialise as lists
             "commit_history": [list(e) for e in self.commit_history],
             "strategy_history": self.strategy_history,
@@ -113,15 +119,23 @@ class Harness:
             state = json.loads(path.read_text(encoding="utf-8"))
             self._completed_rounds = int(state.get("completed_rounds", 0))
             self.score_history = [float(s) for s in state.get("score_history", [])]
+            self.sprint_score_history = [float(s) for s in state.get("sprint_score_history", [])]
+            self.overall_score_history = [float(s) for s in state.get("overall_score_history", [])]
+            # 兼容旧 state：如果新结构不存在，从 score_history 复制
+            if not self.sprint_score_history and self.score_history:
+                self.sprint_score_history = list(self.score_history)
+            if not self.overall_score_history and self.score_history:
+                self.overall_score_history = list(self.score_history)
             self.commit_history = [tuple(e) for e in state.get("commit_history", [])]
             self.strategy_history = state.get("strategy_history", [])
             self.token_totals = state.get("token_totals", {"prompt": 0, "completion": 0})
             self.round_stats = state.get("round_stats", [])
             self._resumed = True
+            last_overall = self.overall_score_history[-1] if self.overall_score_history else 'n/a'
             log.info(
                 f"[state] Resumed from {config.STATE_FILE} — "
                 f"{self._completed_rounds} round(s) already completed, "
-                f"last score: {self.score_history[-1] if self.score_history else 'n/a'}"
+                f"last overall: {last_overall}"
             )
         except Exception as e:
             log.warning(f"[state] Could not load state (will start fresh): {e}")
@@ -135,6 +149,21 @@ class Harness:
                 log.debug(f"[state] Cleared {config.STATE_FILE}")
         except Exception as e:
             log.warning(f"[state] Could not remove state file: {e}")
+
+    def _setup_file_logging(self):
+        """为当前 workspace 设置独立的文件日志 Handler，支持实时监控。"""
+        log_path = self.workspace / "harness.log"
+        # 避免重复添加（恢复运行时可能重新实例化 Harness）
+        for h in log.handlers:
+            if isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', None) == str(log_path):
+                return
+        file_handler = logging.FileHandler(log_path, encoding="utf-8", mode="a")
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        ))
+        log.addHandler(file_handler)
+        log.info(f"[logging] File logging enabled: {log_path}")
 
     def _init_git(self):
         """初始化 git"""
@@ -161,10 +190,12 @@ class Harness:
         log.info(f"Workspace: {self.workspace}")
         log.info(f"Prompt: {user_prompt}")
         if self._resumed:
+            last_sprint = self.sprint_score_history[-1] if self.sprint_score_history else 'n/a'
+            last_overall = self.overall_score_history[-1] if self.overall_score_history else 'n/a'
             log.info(
                 f"Resuming from round {self._completed_rounds + 1} "
                 f"(completed: {self._completed_rounds}, "
-                f"last score: {self.score_history[-1] if self.score_history else 'n/a'})"
+                f"last sprint: {last_sprint}, last overall: {last_overall})"
             )
 
         spec_path = self.workspace / config.SPEC_FILE
@@ -206,7 +237,7 @@ class Harness:
             log.info("="*60)
 
             score = self._build_round(round_num)
-            self.score_history.append(score)
+            # 注意：_build_round 内部已经 append 了 sprint/overall/score_history
 
             # Persist state immediately after every round so an interruption at any
             # later point (the next round's planning, contract, or build) is recoverable.
@@ -214,7 +245,7 @@ class Harness:
             self._save_state()
 
             if score >= config.PASS_THRESHOLD:
-                log.info(f"\n🎉 Success! Final score: {score}")
+                log.info(f"\n🎉 Success! Final overall score: {score}")
                 self._log_final_stats()
                 self._clear_state()
                 return {
@@ -224,14 +255,15 @@ class Harness:
                 }
 
             if round_num < config.MAX_ROUNDS:
-                log.info(f"Score {score} below threshold {config.PASS_THRESHOLD}, continuing...")
+                log.info(f"Overall score {score:.1f} below threshold {config.PASS_THRESHOLD}, continuing...")
 
         self._log_final_stats()
         # Leave STATE_FILE in place on failure so the run can be resumed or inspected.
+        final_score = self.overall_score_history[-1] if self.overall_score_history else 0
         return {
             "success": False,
-            "score": self.score_history[-1] if self.score_history else 0,
-            "rounds": len(self.score_history),
+            "score": final_score,
+            "rounds": len(self.overall_score_history),
             "token_totals": dict(self.token_totals),
             "round_stats": list(self.round_stats),
         }
@@ -377,23 +409,51 @@ class Harness:
         """执行一轮 Build-Evaluate"""
         round_start = time.time()
 
-        # 回滚检查：若上一轮分数低于历史最高分，在 Builder 启动前先恢复到最优版本。
+        # 阶段化回退策略（双轨评分）
+        # 1. Sprint 不及格 → 回退到本轮开始前的状态（修复当前阶段）
+        # 2. Overall 显著退化 → 回退到历史最优 overall（全局方向错误）
+        # 3. 其他情况 → 继续下一轮 Sprint
         rollback_msg = ""
-        if self.score_history and self.commit_history:
-            best_idx = max(range(len(self.score_history)), key=lambda i: self.score_history[i])
-            best_score = self.score_history[best_idx]
-            last_score = self.score_history[-1]
-            if last_score < best_score:
-                _, best_hash = self.commit_history[best_idx]
+
+        # 检查 1: 上一轮 Sprint 不及格
+        if self.sprint_score_history and self.sprint_score_history[-1] < config.SPRINT_PASS_THRESHOLD:
+            if self.commit_history:
+                # 回退到最新 commit（上一轮结束时的状态），强制重做/修复
+                _, latest_hash = self.commit_history[-1]
                 self._rollback_to(
-                    best_hash,
-                    f"score dropped {last_score:.1f} → best was {best_score:.1f} at round {best_idx + 1}"
+                    latest_hash,
+                    f"Sprint score {self.sprint_score_history[-1]:.1f} below threshold {config.SPRINT_PASS_THRESHOLD}"
                 )
                 rollback_msg = (
-                    f"\nNOTE: The workspace was rolled back to round {best_idx + 1} "
-                    f"(score {best_score:.1f}) because the last round regressed to {last_score:.1f}. "
-                    f"Build from this better baseline."
+                    f"\nNOTE: Last sprint scored {self.sprint_score_history[-1]:.1f} "
+                    f"(below threshold {config.SPRINT_PASS_THRESHOLD}). "
+                    f"You MUST fix the failing criteria from the last sprint BEFORE adding new features. "
+                    f"Do NOT move on to new tasks until this sprint passes."
                 )
+            else:
+                rollback_msg = (
+                    f"\nNOTE: Last sprint scored {self.sprint_score_history[-1]:.1f} "
+                    f"(below threshold {config.SPRINT_PASS_THRESHOLD}). "
+                    f"Fix the current implementation before proceeding."
+                )
+
+        # 检查 2: Overall 显著退化（Sprint 及格但整体趋势向下）
+        elif self.overall_score_history and len(self.overall_score_history) >= 2:
+            best_idx = max(range(len(self.overall_score_history)), key=lambda i: self.overall_score_history[i])
+            best_overall = self.overall_score_history[best_idx]
+            last_overall = self.overall_score_history[-1]
+            if last_overall < best_overall - config.SIGNIFICANT_DROP:
+                if len(self.commit_history) > best_idx:
+                    _, best_hash = self.commit_history[best_idx]
+                    self._rollback_to(
+                        best_hash,
+                        f"Overall dropped {last_overall:.1f} → best was {best_overall:.1f} at round {best_idx + 1}"
+                    )
+                    rollback_msg = (
+                        f"\nNOTE: Overall score dropped to {last_overall:.1f}. "
+                        f"Rolled back to round {best_idx + 1} (best overall {best_overall:.1f}). "
+                        f"The last approach broke existing functionality. Fix or change strategy."
+                    )
 
         # Sprint 规划：决定本轮 Builder 聚焦的 1-2 个任务
         self._plan_sprint(round_num)
@@ -421,27 +481,52 @@ class Harness:
         if head_hash:
             self.commit_history.append((round_num, head_hash))
 
-        # Evaluate — use per-sprint contract when available, otherwise fall back to global contract
-        log.info("Evaluate phase")
+        # Evaluate — 三层分工：CodeReviewer → BrowserTester → Evaluator(打分)
+        # 核心价值：子 Agent 的上下文相互隔离，不会污染父 Agent 的 messages 列表
         sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
-        if sprint_contract_path.exists():
-            criteria_instruction = (
-                f"1. Read {config.SPRINT_CONTRACT_FILE} — this is the PRIMARY criteria for this round.\n"
-                f"   Also read {config.CONTRACT_FILE} for broader quality standards.\n"
-            )
-        else:
-            criteria_instruction = f"1. Read {config.CONTRACT_FILE} for criteria.\n"
+        contract_ref = config.SPRINT_CONTRACT_FILE if sprint_contract_path.exists() else config.CONTRACT_FILE
 
-        eval_task = f"""Evaluate the current code against acceptance criteria.
+        # Step 1: Code Review
+        log.info("Evaluate phase — Step 1: Code Review")
+        code_reviewer = Agent("CodeReviewer", CODE_REVIEWER_SYSTEM, TOOL_SCHEMAS)
+        code_review_result, code_review_usage = code_reviewer.run_with_stats(
+            f"Review the codebase against {contract_ref} and {config.CONTRACT_FILE}. "
+            f"List files examined, critical issues, warnings, and feature coverage estimate."
+        )
 
-{criteria_instruction}2. Examine code files in the workspace
-3. If it's a web app, use run_bash to start the dev server (e.g. `npm run dev &`),
-   then call browser_test with url="http://localhost:5173" and relevant actions
-   to verify each criterion from the sprint contract
-4. Give a score and detailed feedback
-5. Save feedback to {config.FEEDBACK_FILE}
+        # Step 2: Browser Test
+        log.info("Evaluate phase — Step 2: Browser Test")
+        browser_tester = Agent("BrowserTester", BROWSER_TESTER_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS)
+        browser_result, browser_usage = browser_tester.run_with_stats(
+            f"Test the web app. Verify criteria from {contract_ref}. "
+            f"Run both desktop (1280x720) and mobile (375x812) tests. Report PASS/FAIL per criterion."
+        )
 
-Include "SCORE: X/10" in your feedback.
+        # Step 3: Scoring — Evaluator 基于前两者的报告打分，不再自己做代码审查和浏览器测试
+        log.info("Evaluate phase — Step 3: Scoring")
+        # 截断报告，防止 Evaluator 上下文爆炸
+        code_review_summary = code_review_result[:5000] if len(code_review_result) > 5000 else code_review_result
+        browser_summary = browser_result[:5000] if len(browser_result) > 5000 else browser_result
+
+        eval_task = f"""You are the lead QA engineer. Synthesize the following specialist reports into a final evaluation.
+
+You do NOT need to read source files or run browser tests — the specialists have already done that.
+Your job is to apply the scoring rubric and write the final feedback.
+
+## Code Review Report
+{code_review_summary}
+
+## Browser Test Report
+{browser_summary}
+
+## Instructions
+1. Read {contract_ref} for the acceptance criteria context.
+2. Read {config.CONTRACT_FILE} for broader quality standards.
+3. Score each dimension with concrete evidence from the reports above.
+4. Calculate and output BOTH scores:
+   - SPRINT_SCORE: X/10 (how well this sprint's tasks were completed)
+   - OVERALL_SCORE: X/10 (weighted overall, using the 40/30/15/15 formula)
+5. Save feedback to {config.FEEDBACK_FILE}.
 """
         eval_result, eval_usage = self.evaluator.run_with_stats(eval_task)
 
@@ -457,7 +542,12 @@ Include "SCORE: X/10" in your feedback.
         else:
             eval_text = eval_result
 
-        score = self._parse_score(eval_text)
+        sprint_score, overall_score = self._parse_scores(eval_text)
+        self.sprint_score_history.append(sprint_score)
+        self.overall_score_history.append(overall_score)
+        # 保留兼容：score_history 也记录 overall_score
+        self.score_history.append(overall_score)
+        log.info(f"  Sprint score: {sprint_score:.1f}/10 | Overall score: {overall_score:.1f}/10")
 
         # Parse per-dimension scores and log them
         dim_scores = self._parse_dimension_scores(eval_text)
@@ -471,6 +561,7 @@ Include "SCORE: X/10" in your feedback.
 
         # Hard threshold check: if any dimension is below its threshold, force the round
         # to fail even if the overall score is above PASS_THRESHOLD.
+        score = overall_score  # 用于后续判断的分数
         failed_dims = self._check_dimension_thresholds(dim_scores)
         if failed_dims:
             log.warning(f"Hard threshold(s) failed: {', '.join(failed_dims)}")
@@ -483,8 +574,19 @@ Include "SCORE: X/10" in your feedback.
                 score = config.PASS_THRESHOLD - 0.1
 
         # Accumulate token usage and record per-round stats
-        round_prompt = build_usage["prompt"] + eval_usage["prompt"]
-        round_completion = build_usage["completion"] + eval_usage["completion"]
+        # 包含 Build + CodeReview + BrowserTest + Scoring 四个阶段的 token
+        round_prompt = (
+            build_usage["prompt"]
+            + code_review_usage["prompt"]
+            + browser_usage["prompt"]
+            + eval_usage["prompt"]
+        )
+        round_completion = (
+            build_usage["completion"]
+            + code_review_usage["completion"]
+            + browser_usage["completion"]
+            + eval_usage["completion"]
+        )
         self.token_totals["prompt"] += round_prompt
         self.token_totals["completion"] += round_completion
         elapsed = time.time() - round_start
@@ -530,8 +632,8 @@ Include "SCORE: X/10" in your feedback.
         if feedback_path.exists() and round_num > 1:
             task += f"3. Read {config.FEEDBACK_FILE} for previous feedback and address relevant issues.\n"
 
-            if len(self.score_history) >= 2:
-                delta = self.score_history[-1] - self.score_history[-2]
+            if len(self.overall_score_history) >= 2:
+                delta = self.overall_score_history[-1] - self.overall_score_history[-2]
                 if delta > 0:
                     task += f"\nTrend: Improving (+{delta:.1f}), continue refining."
                 elif delta < 0:
@@ -599,8 +701,12 @@ Include "SCORE: X/10" in your feedback.
         cum_completion = self.token_totals["completion"]
         cum_total = cum_prompt + cum_completion
 
+        # 显示双轨分数
+        sprint_s = self.sprint_score_history[-1] if self.sprint_score_history else 0.0
+        overall_s = self.overall_score_history[-1] if self.overall_score_history else 0.0
+
         log.info(
-            f"[stats] Round {round_num:>2} | score {score:>4.1f}/10 | "
+            f"[stats] Round {round_num:>2} | sprint {sprint_s:>4.1f} | overall {overall_s:>4.1f} | "
             f"tokens: {prompt_tokens:>6}p + {completion_tokens:>6}c = {total_tokens:>7} | "
             f"elapsed: {elapsed_s:>6.1f}s"
         )
@@ -619,14 +725,16 @@ Include "SCORE: X/10" in your feedback.
         log.info("Cost / Time Summary")
         log.info("="*72)
         log.info(
-            f"{'Round':>5} | {'Score':>5} | {'Strategy':>8} | "
+            f"{'Round':>5} | {'Sprint':>6} | {'Overall':>7} | {'Strategy':>8} | "
             f"{'Prompt':>7} | {'Compl.':>7} | {'Total':>7} | {'Time(s)':>7}"
         )
-        log.info("-"*72)
-        for s in self.round_stats:
+        log.info("-"*80)
+        for i, s in enumerate(self.round_stats):
             total = s["prompt_tokens"] + s["completion_tokens"]
+            sprint_s = self.sprint_score_history[i] if i < len(self.sprint_score_history) else 0.0
+            overall_s = self.overall_score_history[i] if i < len(self.overall_score_history) else 0.0
             log.info(
-                f"{s['round']:>5} | {s['score']:>5.1f} | {s['strategy']:>8} | "
+                f"{s['round']:>5} | {sprint_s:>6.1f} | {overall_s:>7.1f} | {s['strategy']:>8} | "
                 f"{s['prompt_tokens']:>7} | {s['completion_tokens']:>7} | "
                 f"{total:>7} | {s['elapsed_s']:>7.1f}"
             )
@@ -640,18 +748,27 @@ Include "SCORE: X/10" in your feedback.
         )
         log.info("="*72)
 
-    def _parse_score(self, text: str) -> float:
-        """Parse the overall SCORE: X/10 from evaluator feedback."""
-        patterns = [
-            r'SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*10',
-            r'Score:\s*(\d+(?:\.\d+)?)\s*/\s*10',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return float(match.group(1))
-        log.warning("Could not parse score, defaulting to 0")
-        return 0.0
+    def _parse_scores(self, text: str) -> tuple[float, float]:
+        """Parse SPRINT_SCORE and OVERALL_SCORE from evaluator feedback.
+
+        Returns (sprint_score, overall_score).
+        If new format not found, falls back to legacy SCORE line.
+        """
+        sprint_match = re.search(r'SPRINT_SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*10', text, re.IGNORECASE)
+        overall_match = re.search(r'OVERALL_SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*10', text, re.IGNORECASE)
+
+        if sprint_match and overall_match:
+            return float(sprint_match.group(1)), float(overall_match.group(1))
+
+        # Fallback: legacy single SCORE line — treat both as the same
+        legacy_match = re.search(r'SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*10', text, re.IGNORECASE)
+        if legacy_match:
+            score = float(legacy_match.group(1))
+            log.warning("Legacy single SCORE found — using it for both sprint and overall")
+            return score, score
+
+        log.warning("Could not parse any score, defaulting to 0")
+        return 0.0, 0.0
 
     def _parse_dimension_scores(self, text: str) -> dict:
         """Parse per-dimension scores from '### Dimension Name: X/10' headings."""

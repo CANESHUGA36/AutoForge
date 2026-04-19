@@ -39,6 +39,10 @@ RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "150000"))
 MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "5"))
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
+# 双轨评分 —— Sprint 过程门槛 + Overall 交付门槛
+SPRINT_PASS_THRESHOLD = float(os.environ.get("SPRINT_PASS_THRESHOLD", "6.0"))
+SIGNIFICANT_DROP = float(os.environ.get("SIGNIFICANT_DROP", "1.0"))
+
 # Per-dimension hard thresholds — if any dimension scores below its threshold,
 # the sprint is forced to fail regardless of the overall score.
 # Keys must match the canonical names returned by Harness._parse_dimension_scores().
