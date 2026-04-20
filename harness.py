@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import config
@@ -26,6 +27,8 @@ from prompts import (
     CODE_REVIEWER_SYSTEM, BROWSER_TESTER_SYSTEM,
 )
 from tools import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
+from eval_cache import EvalCache
+from dashboard import Dashboard
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,8 +51,8 @@ class Harness:
         # 创建 Agent
         self.planner = Agent("Planner", PLANNER_SYSTEM, TOOL_SCHEMAS)
         self.sprint_planner = Agent("SprintPlanner", SPRINT_PLANNER_SYSTEM, TOOL_SCHEMAS)
-        self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS)
-        self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS)
+        self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS, use_state=True)
+        self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, use_state=True)
 
         self.score_history: list[float] = []          # 保留兼容旧 state
         self.sprint_score_history: list[float] = []     # 本轮 Sprint 质量（基于 sprint_contract）
@@ -71,6 +74,12 @@ class Harness:
         # Used by run() to skip phases and rounds that were done in a previous session.
         self._completed_rounds: int = 0
         self._resumed: bool = False
+
+        # P2: Evaluator 结果缓存
+        self.eval_cache = EvalCache(str(self.workspace))
+
+        # P2: Dashboard 实时监控
+        self.dashboard = Dashboard(str(self.workspace))
 
         self._load_state()
 
@@ -230,12 +239,14 @@ class Harness:
             self._negotiate_contract()
 
         # Phase 3+: Build-Evaluate loop — start from the next unfinished round
+        self.dashboard.start_run()
         start_round = self._completed_rounds + 1
         for round_num in range(start_round, config.MAX_ROUNDS + 1):
             log.info("\n" + "="*60)
             log.info(f"Round {round_num}/{config.MAX_ROUNDS}")
             log.info("="*60)
 
+            self.dashboard.start_round(round_num)
             score = self._build_round(round_num)
             # 注意：_build_round 内部已经 append 了 sprint/overall/score_history
 
@@ -248,6 +259,7 @@ class Harness:
                 log.info(f"\n🎉 Success! Final overall score: {score}")
                 self._log_final_stats()
                 self._clear_state()
+                self.dashboard.end_run(success=True)
                 return {
                     "success": True, "score": score, "rounds": round_num,
                     "token_totals": dict(self.token_totals),
@@ -260,6 +272,7 @@ class Harness:
         self._log_final_stats()
         # Leave STATE_FILE in place on failure so the run can be resumed or inspected.
         final_score = self.overall_score_history[-1] if self.overall_score_history else 0
+        self.dashboard.end_run(success=False)
         return {
             "success": False,
             "score": final_score,
@@ -269,22 +282,11 @@ class Harness:
         }
 
     def _negotiate_contract(self):
-        """协商验收标准"""
+        """协商验收标准（精简版：单次生成，跳过Reviewer循环）"""
         proposer = Agent("ContractProposer", CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS)
-        reviewer = Agent("ContractReviewer", CONTRACT_REVIEWER_SYSTEM, TOOL_SCHEMAS)
-
-        for attempt in range(3):
-            log.info(f"Contract negotiation attempt {attempt + 1}/3")
-
-            proposer.run(f"Read {config.SPEC_FILE} and create acceptance criteria in {config.CONTRACT_FILE}")
-            review = reviewer.run(f"Review {config.CONTRACT_FILE}")
-
-            if "APPROVED" in review:
-                log.info("Contract approved")
-                return
-            log.debug(f"Contract review: {review[:200]}...")
-
-        log.info("Max contract negotiation attempts reached")
+        log.info("Contract generation (single-pass)")
+        proposer.run(f"Read {config.SPEC_FILE} and create acceptance criteria in {config.CONTRACT_FILE}")
+        log.info("Contract created")
 
     def _plan_sprint(self, round_num: int) -> None:
         """在 Builder 启动前，由 Sprint Planner 生成本轮聚焦的任务清单（sprint.md）。"""
@@ -317,46 +319,29 @@ class Harness:
             log.warning("SprintPlanner did not create sprint.md, Builder will fall back to spec.md")
 
     def _negotiate_sprint_contract(self, round_num: int) -> None:
-        """Negotiate a per-sprint acceptance contract between a dedicated contract writer and reviewer.
+        """生成本轮 Sprint 的验收合同（精简版：单次生成，无Reviewer循环）。
 
         The contract is saved to SPRINT_CONTRACT_FILE and covers only the tasks in sprint.md for
         this round, giving the Evaluator a focused, round-specific Definition of Done.
         """
-        log.info("Sprint contract negotiation phase")
+        log.info("Sprint contract generation phase")
 
         sprint_path = self.workspace / config.SPRINT_FILE
         if not sprint_path.exists():
-            log.warning("sprint.md not found — skipping per-sprint contract negotiation")
+            log.warning("sprint.md not found — skipping per-sprint contract")
             return
 
         writer = Agent("SprintContractWriter", SPRINT_CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS)
-        reviewer = Agent("SprintContractReviewer", SPRINT_CONTRACT_REVIEWER_SYSTEM, TOOL_SCHEMAS)
+        writer.run(
+            f"Round {round_num}: Read {config.SPRINT_FILE} and {config.CONTRACT_FILE}, "
+            f"then write the sprint contract to {config.SPRINT_CONTRACT_FILE}."
+        )
 
-        for attempt in range(3):
-            log.info(f"Sprint contract negotiation attempt {attempt + 1}/3")
-
-            writer.run(
-                f"Round {round_num}: Read {config.SPRINT_FILE} and {config.CONTRACT_FILE}, "
-                f"then write the sprint contract to {config.SPRINT_CONTRACT_FILE}."
-            )
-
-            sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
-            if not sprint_contract_path.exists():
-                log.warning("SprintContractWriter did not create sprint_contract.md")
-                continue
-
-            review = reviewer.run(
-                f"Review {config.SPRINT_CONTRACT_FILE} against {config.SPRINT_FILE}. "
-                f"Reply APPROVED or list issues."
-            )
-
-            if "APPROVED" in review:
-                log.info(f"Sprint contract approved on attempt {attempt + 1}")
-                return
-
-            log.info(f"Sprint contract review feedback: {review[:200]}...")
-
-        log.info("Sprint contract negotiation max attempts reached — using last written version")
+        sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
+        if sprint_contract_path.exists():
+            log.info("Sprint contract created")
+        else:
+            log.warning("SprintContractWriter did not create sprint_contract.md")
 
     def _get_head_hash(self) -> str | None:
         """获取当前 HEAD 的 commit hash，若仓库尚无提交则返回 None。"""
@@ -463,8 +448,10 @@ class Harness:
 
         # Build
         log.info("Build phase")
+        self.dashboard.start_agent("Builder")
         build_task = self._build_build_task(round_num, rollback_msg)
         build_result, build_usage = self.builder.run_with_stats(build_task)
+        self.dashboard.end_agent("success")
 
         # Parse the Builder's strategy declaration from this round's output
         strategy = self._parse_strategy(build_result)
@@ -481,54 +468,72 @@ class Harness:
         if head_hash:
             self.commit_history.append((round_num, head_hash))
 
+        # P2: 构建失败快速回退 —— 如果 Builder 产出了构建错误，直接跳过 Evaluate
+        ws_state_path = self.workspace / ".workspace_state.json"
+        if ws_state_path.exists():
+            try:
+                ws_data = json.loads(ws_state_path.read_text(encoding="utf-8"))
+                if ws_data.get("last_build_status") == "error":
+                    log.warning("[build_gate] Build failed — skipping evaluation and forcing retry")
+                    self.dashboard.add_alert(f"Build failed in round {round_num}, skipping eval")
+                    # 返回一个低于阈值的分数，强制进入下一轮修复
+                    score = config.SPRINT_PASS_THRESHOLD - 0.5
+                    self.sprint_score_history.append(score)
+                    self.overall_score_history.append(score)
+                    self.score_history.append(score)
+                    
+                    # 记录统计
+                    round_prompt = build_usage["prompt"]
+                    round_completion = build_usage["completion"]
+                    self.token_totals["prompt"] += round_prompt
+                    self.token_totals["completion"] += round_completion
+                    elapsed = time.time() - round_start
+                    self.round_stats.append({
+                        "round": round_num,
+                        "score": score,
+                        "strategy": strategy["strategy"],
+                        "prompt_tokens": round_prompt,
+                        "completion_tokens": round_completion,
+                        "elapsed_s": elapsed,
+                    })
+                    self._log_round_stats(round_num, score, round_prompt, round_completion, elapsed)
+                    self.dashboard.update_scores(score, score)
+                    self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
+                    return score
+            except Exception as e:
+                log.debug(f"[build_gate] Could not check build status: {e}")
+
         # Evaluate — 三层分工：CodeReviewer → BrowserTester → Evaluator(打分)
         # 核心价值：子 Agent 的上下文相互隔离，不会污染父 Agent 的 messages 列表
         sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
         contract_ref = config.SPRINT_CONTRACT_FILE if sprint_contract_path.exists() else config.CONTRACT_FILE
 
-        # Step 1: Code Review
-        log.info("Evaluate phase — Step 1: Code Review")
+        # Step 1 & 2: Code Review + Browser Test —— 并行执行
+        log.info("Evaluate phase — Step 1 & 2: Code Review + Browser Test (parallel)")
+        self.dashboard.start_agent("CodeReviewer+BrowserTester")
         code_reviewer = Agent("CodeReviewer", CODE_REVIEWER_SYSTEM, TOOL_SCHEMAS)
-        code_review_result, code_review_usage = code_reviewer.run_with_stats(
-            f"Review the codebase against {contract_ref} and {config.CONTRACT_FILE}. "
-            f"List files examined, critical issues, warnings, and feature coverage estimate."
-        )
-
-        # Step 2: Browser Test
-        log.info("Evaluate phase — Step 2: Browser Test")
         browser_tester = Agent("BrowserTester", BROWSER_TESTER_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS)
-        browser_result, browser_usage = browser_tester.run_with_stats(
-            f"Test the web app. Verify criteria from {contract_ref}. "
-            f"Run both desktop (1280x720) and mobile (375x812) tests. Report PASS/FAIL per criterion."
+
+        code_review_result, code_review_usage, browser_result, browser_usage = self._run_eval_parallel(
+            code_reviewer, browser_tester, contract_ref
         )
+        self.dashboard.end_agent("success")
 
-        # Step 3: Scoring — Evaluator 基于前两者的报告打分，不再自己做代码审查和浏览器测试
+        # Step 3: Scoring — Evaluator 基于前两者的报告打分
         log.info("Evaluate phase — Step 3: Scoring")
-        # 截断报告，防止 Evaluator 上下文爆炸
-        code_review_summary = code_review_result[:5000] if len(code_review_result) > 5000 else code_review_result
-        browser_summary = browser_result[:5000] if len(browser_result) > 5000 else browser_result
-
-        eval_task = f"""You are the lead QA engineer. Synthesize the following specialist reports into a final evaluation.
-
-You do NOT need to read source files or run browser tests — the specialists have already done that.
-Your job is to apply the scoring rubric and write the final feedback.
-
-## Code Review Report
-{code_review_summary}
-
-## Browser Test Report
-{browser_summary}
-
-## Instructions
-1. Read {contract_ref} for the acceptance criteria context.
-2. Read {config.CONTRACT_FILE} for broader quality standards.
-3. Score each dimension with concrete evidence from the reports above.
-4. Calculate and output BOTH scores:
-   - SPRINT_SCORE: X/10 (how well this sprint's tasks were completed)
-   - OVERALL_SCORE: X/10 (weighted overall, using the 40/30/15/15 formula)
-5. Save feedback to {config.FEEDBACK_FILE}.
-"""
+        self.dashboard.start_agent("Evaluator")
+        
+        # P2: 使用 EvalCache 生成结构化摘要，替代完整报告截断
+        eval_task = self.eval_cache.build_evaluator_prompt(
+            round_num=round_num,
+            code_review_result=code_review_result,
+            browser_result=browser_result,
+            contract_ref=contract_ref,
+            previous_rounds=2,
+        )
+        
         eval_result, eval_usage = self.evaluator.run_with_stats(eval_task)
+        self.dashboard.end_agent("success")
 
         # Prefer reading feedback.md directly: the Evaluator writes its full structured report
         # there via write_file, and the final assistant message is typically just a short
@@ -600,7 +605,48 @@ Your job is to apply the scoring rubric and write the final feedback.
         })
         self._log_round_stats(round_num, score, round_prompt, round_completion, elapsed)
 
+        # P2: 更新 Dashboard
+        self.dashboard.update_scores(sprint_score, overall_score)
+        self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
+
         return score
+
+    def _run_eval_parallel(
+        self,
+        code_reviewer: Agent,
+        browser_tester: Agent,
+        contract_ref: str,
+    ) -> tuple[str, dict, str, dict]:
+        """并行运行 CodeReviewer 和 BrowserTester，返回 (code_result, code_usage, browser_result, browser_usage)。
+
+        使用 ThreadPoolExecutor 实现并行，节省每轮 5-15 分钟。
+        """
+        def _run_code_review():
+            return code_reviewer.run_with_stats(
+                f"Review the codebase against {contract_ref} and {config.CONTRACT_FILE}. "
+                f"List files examined, critical issues, warnings, and feature coverage estimate."
+            )
+
+        def _run_browser_test():
+            return browser_tester.run_with_stats(
+                f"Test the web app. Verify criteria from {contract_ref}. "
+                f"Run both desktop (1280x720) and mobile (375x812) tests. Report PASS/FAIL per criterion."
+            )
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="eval_") as executor:
+            code_future = executor.submit(_run_code_review)
+            browser_future = executor.submit(_run_browser_test)
+
+            # 等待两者完成（有各自的 Agent 级超时保护）
+            code_review_result, code_review_usage = code_future.result()
+            browser_result, browser_usage = browser_future.result()
+
+        log.info(
+            f"[parallel_eval] CodeReview: {code_review_usage.get('prompt', 0)}p + {code_review_usage.get('completion', 0)}c | "
+            f"BrowserTest: {browser_usage.get('prompt', 0)}p + {browser_usage.get('completion', 0)}c"
+        )
+
+        return code_review_result, code_review_usage, browser_result, browser_usage
 
     def _build_build_task(self, round_num: int, rollback_msg: str = "") -> str:
         """Build the task prompt for the Builder agent."""
@@ -830,7 +876,15 @@ def main():
     parser.add_argument("--reset", action="store_true",
                         help="Delete harness_state.json before starting, forcing a clean run "
                              "even if the workspace already contains a previous state file.")
+    parser.add_argument("--dashboard", action="store_true",
+                        help="Print dashboard state and exit (for monitoring a running harness).")
     args = parser.parse_args()
+
+    # --dashboard: 只打印状态然后退出
+    if args.dashboard and args.workspace:
+        from dashboard import print_dashboard
+        print_dashboard(args.workspace)
+        return 0
 
     # 未手动指定 --workspace 时，自动生成带时间戳的独立目录
     workspace = args.workspace if args.workspace else _make_workspace(args.prompt)
