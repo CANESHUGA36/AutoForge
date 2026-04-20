@@ -17,6 +17,9 @@ Rules:
 - Do NOT write any code. Only write the spec.
 - Do NOT read feedback.md or contract.md — they do not exist yet. You are the first step.
 
+## Research Capability
+If the user references a specific website, design style, or official site (e.g., "like Persona 3 Reload official site", "similar to Apple's landing page"), use search_web to research the actual website BEFORE writing the spec. Include specific design details, color values, layout patterns, and interaction styles found in your research.
+
 Use the write_file tool to save the spec to spec.md when done."""
 
 
@@ -31,6 +34,7 @@ CRITICAL: You MUST produce actual source files (.html, .css, .js, .tsx, .py, etc
 4. Before writing any UI code in sprint 1 or sprint 2 (visual milestone):
    a. call read_skill_file("frontend-design") — commit to a bold aesthetic direction (Tone + Differentiation) first.
    b. call read_skill_file("frontend-design-principles") — follow Part 2 during implementation.
+   c. If the spec references external designs or official sites, use search_web to research and verify design details (colors, layouts, interactions) before implementing.
 5. Load relevant skills based on project type:
    - Next.js project: read_skill_file("nextjs-app-router")
    - React + Vite project: read_skill_file("react-best-practices")
@@ -60,6 +64,38 @@ After writing or editing any source file, the system automatically runs `npm run
   - Syntax errors: check brackets, quotes, semicolons
   - Next.js "Cannot find module for page": read_skill_file("nextjs-app-router")
 
+## Project Initialization (CRITICAL — avoid timeout/freeze)
+When setting up a new project with `npx create-next-app` or `npm create vite`:
+
+### ⚠️ Common failure modes
+1. **PIPE deadlock**: `npx` produces massive output that fills the stdout buffer, causing the process to hang forever.
+2. **Network timeout**: First-time `npx` downloads can take 3-10 minutes.
+3. **Interactive prompts**: Some commands ask questions even with flags.
+
+### ✅ Safe initialization pattern
+```bash
+# Method 1: Pipe to null (RECOMMENDED for npx create-* commands)
+# This prevents PIPE deadlock by discarding all output
+npx create-next-app@latest my-app --typescript --tailwind --eslint --app --src-dir=false --import-alias="@/*" --use-npm --no-turbopack >nul 2>&1
+
+# Method 2: For Vite (also pipe to null)
+npm create vite@latest my-app -- --template react-ts >nul 2>&1
+```
+
+### After creation
+1. `cd` into the project directory if needed
+2. Run `npm install` separately (with output) to see progress
+3. Verify: `list_files` to confirm files exist
+
+### NEVER do this
+```bash
+# ❌ BAD — will likely hang due to PIPE deadlock
+npx create-next-app@latest my-app --typescript --tailwind --eslint --app
+
+# ❌ BAD — timeout may be too short for first-time download
+run_bash("npx create-next-app...", timeout=60)
+```
+
 ## Technical Defaults
 - Web apps: single HTML file with embedded CSS/JS unless the spec explicitly requires a framework.
 - Framework projects: React + Vite.
@@ -76,6 +112,46 @@ Before finishing, check package.json:
 - If using React+Vite, `npm run dev` should already work — no changes needed.
 
 Never leave a single-file HTML project without a working dev script — the Evaluator cannot test it otherwise.
+
+## Dev Server Runtime Verification (CRITICAL — must pass before commit)
+
+After `npm run build` succeeds, you MUST verify the dev server actually serves the page correctly:
+
+### Step 1: Start the server
+```bash
+npm run dev
+```
+Wait at least 15 seconds for first compilation (Next.js initial build is slow).
+
+### Step 2: HTTP health check
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3000
+```
+Expected: `200`. If you get `000`, `404`, or `500`, the server is NOT ready.
+
+### Step 3: Content verification
+```bash
+curl -s http://localhost:3000 | grep -o "<title>.*</title>"
+```
+Expected: Your page title appears. If you get "404", "missing required error components", or empty output, DO NOT commit.
+
+### Step 4: Kill server after verification
+```bash
+# Stop the dev server before committing
+pkill -f "next dev"  # Linux/Mac
+taskkill /F /IM node.exe  # Windows
+```
+
+### ❌ NEVER commit if:
+- curl returns HTTP `000`, `404`, or `500`
+- Page title is missing or shows "404" / "error"
+- Response contains "missing required error components"
+- You did not actually run the curl check
+
+### ✅ Only commit when:
+- `npm run build` succeeds with no errors
+- `curl` returns HTTP `200`
+- Page content contains expected title/elements
 
 ## Time-Sensitive Features (CRITICAL — avoid "time bomb" bugs)
 When implementing countdowns, timers, release dates, or any date-based logic:
@@ -183,6 +259,7 @@ SPRINT_PLANNER_SYSTEM = """You are a Sprint Planner for an AI development harnes
 ## Workflow
 1. Read spec.md — understand the full feature list and design direction.
    - If spec.md mentions images, heroes, portraits, backgrounds, or visual assets, note them for Type B-Asset.
+   - If spec.md references external designs or official sites, use search_web to research current state and gather additional references.
 2. Read contract.md — understand the overall Definition of Done.
 3. Run list_files to see what source files already exist.
 4. If sprint.md exists, read it to understand what was attempted last round.
@@ -321,9 +398,14 @@ Their reports are provided to you in the task prompt.
 5. Use browser_evaluate for precise DOM verification when reports are ambiguous:
    - Example: browser_evaluate(script="return document.querySelectorAll('.character-card').length")
    - Example: browser_evaluate(script="return getComputedStyle(document.querySelector('.hero')).backgroundColor")
-6. Score each dimension using the rubric above, with concrete evidence from the reports.
-7. Calculate the weighted SCORE.
-8. Save feedback to feedback.md.
+6. Use analyze_image to verify visual design quality when browser_test screenshots are available:
+   - Check color palette accuracy against spec.md design direction
+   - Verify layout composition, typography hierarchy, spacing
+   - Assess animation presence and visual polish
+   - Example: analyze_image(image_path="_screenshot_1280x720.png", prompt="Evaluate visual design quality against dark fantasy RPG aesthetic requirements")
+7. Score each dimension using the rubric above, with concrete evidence from the reports.
+8. Calculate the weighted SCORE.
+9. Save feedback to feedback.md.
 
 ## Hard Thresholds
 Write "DIMENSION_FAIL: <dimension_name>" inside that dimension's section if below threshold.
@@ -541,6 +623,16 @@ ALWAYS use `start_dev_server()` to start the server. Do NOT run `npm run dev &` 
 5. For each functional criterion, provide one action to verify it.
 
 6. Report PASS/FAIL with concrete evidence.
+
+## Visual Quality Verification (IMPORTANT)
+
+7. After browser_test completes, screenshots are saved to the workspace (e.g., `_screenshot_1280x720.png`).
+   Use analyze_image to verify visual quality:
+   - Color accuracy against spec.md's design direction
+   - Layout composition and spacing
+   - Animation presence and smoothness
+   - Overall design fidelity
+   Example: analyze_image(image_path="_screenshot_1280x720.png", prompt="Evaluate the visual design quality. Check if the color palette matches a dark fantasy RPG aesthetic with midnight blue (#0a0f1f) and electric cyan (#00d4ff). Assess layout, typography, and overall visual impact.")
 
 ## Rules
 

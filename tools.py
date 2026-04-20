@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import os
 import re
+import signal
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
@@ -256,41 +259,105 @@ def list_files(directory: str = ".", use_cache: bool = True) -> str:
 
 
 def run_bash(command: str, timeout: int = 900) -> str:
-    """执行 bash 命令（修复 PIPE 死锁 + 后台命令支持）。"""
+    """执行 bash 命令（修复 PIPE 死锁 + 后台命令支持 + Windows 兼容）。
+
+    关键修复：
+    1. 使用 Popen + 线程读取 stdout/stderr，避免 capture_output 导致的 PIPE 死锁
+    2. Windows 兼容：不使用 start_new_session（Unix-only），改用 creationflags
+    3. 对 npx/npm 初始化命令自动增加 timeout 预算
+    4. 输出实时流式收集，防止缓冲区满阻塞子进程
+    """
     command = command.strip()
     is_background = command.endswith("&") or " & " in command
+
+    # 自动为项目初始化命令增加 timeout
+    cmd_lower = command.lower()
+    if any(kw in cmd_lower for kw in ["create-next-app", "create vite", "npx create"]):
+        timeout = max(timeout, 600)
 
     try:
         if is_background:
             # 后台命令：彻底 detached，不捕获任何输出
-            proc = subprocess.Popen(
-                command,
-                shell=True,
-                cwd=config.WORKSPACE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            # 给启动时间
+            kwargs = {
+                "shell": True,
+                "cwd": config.WORKSPACE,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            # Windows 兼容：使用 CREATE_NEW_PROCESS_GROUP 替代 start_new_session
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+
+            proc = subprocess.Popen(command, **kwargs)
             time.sleep(2)
             return f"[background] pid {proc.pid}: {command[:80]}"
 
-        # 普通命令：保持原有 capture_output 逻辑
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=config.WORKSPACE,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            **config.SUBPROCESS_TEXT_KWARGS,
-        )
-        output = _smart_truncate(result.stdout, result.stderr)
-        if result.returncode != 0:
-            output = f"[exit code: {result.returncode}]\n{output}"
+        # 普通命令：使用 Popen + 线程读取，避免 PIPE 死锁
+        kwargs = {
+            "shell": True,
+            "cwd": config.WORKSPACE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+        # Windows 兼容
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        proc = subprocess.Popen(command, **kwargs)
+
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        def _read_stream(stream, chunks):
+            try:
+                for chunk in iter(lambda: stream.read(8192), b""):
+                    chunks.append(chunk)
+            except Exception:
+                pass
+
+        # 启动读取线程
+        import threading
+        t_out = threading.Thread(target=_read_stream, args=(proc.stdout, stdout_chunks))
+        t_err = threading.Thread(target=_read_stream, args=(proc.stderr, stderr_chunks))
+        t_out.start()
+        t_err.start()
+
+        # 等待进程完成（带超时）
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # 超时：强制终止
+            try:
+                if os.name == "nt":
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+                proc.wait()
+            t_out.join(timeout=2)
+            t_err.join(timeout=2)
+            return f"[error] Command timed out after {timeout}s"
+
+        # 等待读取线程完成
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
+        # 合并输出
+        stdout_bytes = b"".join(stdout_chunks)
+        stderr_bytes = b"".join(stderr_chunks)
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+
+        output = _smart_truncate(stdout, stderr)
+        if proc.returncode != 0:
+            output = f"[exit code: {proc.returncode}]\n{output}"
         return output or "(no output)"
-    except subprocess.TimeoutExpired:
-        return f"[error] Command timed out after {timeout}s"
+
     except Exception as e:
         return f"[error] {e}"
 
@@ -426,6 +493,169 @@ def generate_image(
         return f"[error] {e}"
 
 
+# ---------------------------------------------------------------------------
+# MiniMax Coding Plan — Search & VLM
+# ---------------------------------------------------------------------------
+
+def _get_minimax_base_url() -> str:
+    """根据环境返回正确的 MiniMax API 域名。"""
+    # 复用 OPENAI_BASE_URL 的域名来判断 region
+    base = getattr(config, "BASE_URL", "")
+    if "minimaxi.com" in base:
+        return "https://api.minimaxi.com"
+    return "https://api.minimax.io"
+
+
+def search_web(query: str, limit: int = 5) -> str:
+    """Search the web using MiniMax Coding Plan search API.
+
+    Args:
+        query: Search query string.
+        limit: Max number of results to return (default 5).
+
+    Returns:
+        Formatted search results or error message.
+    """
+    try:
+        api_key = (config.MINIMAX_API_KEY or "").strip()
+        if not api_key:
+            return "[error] MINIMAX_API_KEY not set; cannot perform web search"
+
+        if not query or not query.strip():
+            return "[error] query is required"
+
+        base_url = _get_minimax_base_url()
+        url = f"{base_url}/v1/coding_plan/search"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {"q": query.strip()}
+
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        try:
+            data = response.json()
+        except Exception:
+            return f"[error] Non-JSON response (HTTP {response.status_code}): {response.text[:800]}"
+
+        # Check base_resp status (some endpoints use this)
+        base_resp = data.get("base_resp", {})
+        status_code = base_resp.get("status_code", 0)
+        if status_code != 0:
+            status_msg = base_resp.get("status_msg", "unknown error")
+            return f"[error] API error {status_code}: {status_msg}"
+
+        # The search API returns results in "organic" array
+        results = data.get("organic", [])
+        if not results:
+            return "No results found."
+
+        # Format results
+        lines = [f"Search results for: '{query}'", ""]
+        for i, r in enumerate(results[:limit], 1):
+            title = r.get("title", "No title")
+            snippet = r.get("snippet", "")
+            link = r.get("link", r.get("url", ""))
+            lines.append(f"{i}. {title}")
+            if snippet:
+                lines.append(f"   {snippet[:300]}")
+            if link:
+                lines.append(f"   URL: {link}")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[error] {e}"
+
+
+def analyze_image(image_path: str, prompt: str = "Describe this image in detail") -> str:
+    """Analyze an image using MiniMax Coding Plan VLM API.
+
+    Supports local file paths (relative to workspace) and URLs.
+
+    Args:
+        image_path: Path to image file (relative to workspace) or URL.
+        prompt: Specific analysis instruction.
+
+    Returns:
+        VLM analysis result or error message.
+    """
+    try:
+        api_key = (config.MINIMAX_API_KEY or "").strip()
+        if not api_key:
+            return "[error] MINIMAX_API_KEY not set; cannot analyze image"
+
+        if not image_path or not image_path.strip():
+            return "[error] image_path is required"
+
+        base_url = _get_minimax_base_url()
+        url = f"{base_url}/v1/coding_plan/vlm"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        image_path = image_path.strip()
+
+        # Determine if it's a URL or local file
+        if image_path.startswith("http://") or image_path.startswith("https://"):
+            payload = {
+                "prompt": prompt.strip(),
+                "image_url": image_path,
+            }
+        else:
+            # Local file - resolve and base64 encode
+            try:
+                p = _resolve(image_path)
+            except ValueError:
+                # Try as absolute path
+                p = Path(image_path)
+            if not p.exists():
+                return f"[error] Image file not found: {image_path}"
+
+            img_bytes = p.read_bytes()
+            mime_type, _ = mimetypes.guess_type(str(p))
+            if not mime_type:
+                mime_type = "image/jpeg"
+            b64_data = base64.b64encode(img_bytes).decode("utf-8")
+            payload = {
+                "prompt": prompt.strip(),
+                "image_url": f"data:{mime_type};base64,{b64_data}",
+            }
+
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        try:
+            data = response.json()
+        except Exception:
+            return f"[error] Non-JSON response (HTTP {response.status_code}): {response.text[:800]}"
+
+        # Check base_resp status
+        base_resp = data.get("base_resp", {})
+        status_code = base_resp.get("status_code", 0)
+        if status_code != 0:
+            status_msg = base_resp.get("status_msg", "unknown error")
+            return f"[error] API error {status_code}: {status_msg}"
+
+        # Extract result - VLM API returns content at top level
+        result = data.get("content", "")
+        if not result:
+            result_data = data.get("data", {})
+            if isinstance(result_data, dict):
+                result = result_data.get("content", "")
+                if not result:
+                    result = result_data.get("result", "")
+            else:
+                result = str(result_data)
+        if not result:
+            result = data.get("result", "")
+        if not result:
+            result = str(data)
+
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
 def delegate_task(task: str, role: str = "assistant") -> str:
     """委派任务给子 Agent —— 核心上下文隔离机制。
 
@@ -465,28 +695,45 @@ _dev_server_proc = None
 
 
 def _kill_port(port: int) -> None:
-    """强制释放指定端口。"""
-    try:
-        # 尝试多种方式 kill 端口进程
-        run_bash(f"fuser -k {port}/tcp 2>/dev/null; echo done", timeout=5)
-    except Exception:
-        pass
+    """强制释放指定端口（Windows + Linux/Mac 兼容）。"""
+    # 1. 使用系统命令查找并终止占用端口的进程
+    if os.name == "nt":
+        # Windows: 使用 netstat + taskkill
+        run_bash(
+            f'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :{port}\') do taskkill /F /PID %a 2>nul',
+            timeout=10,
+        )
+    else:
+        # Linux/Mac: 使用 fuser 或 lsof
+        run_bash(f"fuser -k {port}/tcp 2>/dev/null || lsof -ti:{port} | xargs kill -9 2>/dev/null; echo done", timeout=10)
     
-    # 清理全局记录
+    time.sleep(1)
+    
+    # 2. 清理全局记录的 dev server 进程
     global _dev_server_proc
     if _dev_server_proc is not None:
         try:
-            _dev_server_proc.kill()
-            _dev_server_proc.wait(timeout=2)
+            if _dev_server_proc.poll() is None:
+                if os.name == "nt":
+                    _dev_server_proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    _dev_server_proc.terminate()
+                _dev_server_proc.wait(timeout=3)
         except Exception:
-            pass
+            try:
+                _dev_server_proc.kill()
+                _dev_server_proc.wait(timeout=2)
+            except Exception:
+                pass
         _dev_server_proc = None
     
-    # 从 _server_pids 清理
+    # 3. 从 _server_pids 清理
     if port in _server_pids:
         try:
-            import os
-            os.kill(_server_pids[port], 9)
+            if os.name == "nt":
+                os.kill(_server_pids[port], signal.SIGTERM)
+            else:
+                os.kill(_server_pids[port], signal.SIGKILL)
         except Exception:
             pass
         del _server_pids[port]
@@ -542,14 +789,17 @@ def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int =
     
     # 4. 启动 server
     global _dev_server_proc
-    _dev_server_proc = subprocess.Popen(
-        command,
-        shell=True,
-        cwd=config.WORKSPACE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    kwargs = {
+        "shell": True,
+        "cwd": config.WORKSPACE,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    _dev_server_proc = subprocess.Popen(command, **kwargs)
     _server_pids[port] = _dev_server_proc.pid
     
     # 5. 等待并健康检查
@@ -593,14 +843,17 @@ def _browser_test_impl(
     if start_command:
         if _dev_server_proc is None or _dev_server_proc.poll() is not None:
             _kill_dev_server()
-            _dev_server_proc = subprocess.Popen(
-                start_command,
-                shell=True,
-                cwd=config.WORKSPACE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            kwargs = {
+                "shell": True,
+                "cwd": config.WORKSPACE,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+            _dev_server_proc = subprocess.Popen(start_command, **kwargs)
             time.sleep(startup_wait)
         report_lines.append("Server started")
 
@@ -928,6 +1181,32 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": (
+                "Search the web for information, design references, documentation, or examples. "
+                "Use when you need to research a topic, find official websites, gather design inspiration, "
+                "or look up API documentation. Returns structured search results with titles, snippets, and URLs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query. Be specific for better results.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 5)",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 BROWSER_TOOL_SCHEMAS = [
@@ -1037,6 +1316,33 @@ BROWSER_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_image",
+            "description": (
+                "Analyze an image using a vision-language model (VLM). "
+                "Use to verify visual design quality, check color accuracy, verify layout composition, "
+                "or compare against design references. Supports local image files (relative to workspace) and URLs. "
+                "Ideal for analyzing browser_test screenshots or generated images."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_path": {
+                        "type": "string",
+                        "description": "Path to image file (relative to workspace) or URL. For screenshots from browser_test, use the screenshot filename (e.g., '_screenshot_1280x720.png').",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Specific analysis instruction. Example: 'Evaluate the visual design quality, color palette, and layout against a dark fantasy RPG aesthetic.'",
+                        "default": "Describe this image in detail",
+                    },
+                },
+                "required": ["image_path"],
+            },
+        },
+    },
 ]
 
 TOOL_DISPATCH = {
@@ -1050,6 +1356,8 @@ TOOL_DISPATCH = {
     "read_skill_file": read_skill_file,
     "generate_image": generate_image,
     "start_dev_server": start_dev_server,
+    "search_web": search_web,
+    "analyze_image": analyze_image,
 }
 
 
