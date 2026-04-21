@@ -64,7 +64,7 @@ class Harness:
         self.round_stats: list[dict] = []
         self._completed_rounds: int = 0
         self._resumed: bool = False
-        # P2     ?        self.eval_cache = EvalCache(str(self.workspace))
+        self.eval_cache = EvalCache(str(self.workspace))
         self.dashboard = Dashboard(str(self.workspace))
         self._load_state()
     # ------------------------------------------------------------------ #
