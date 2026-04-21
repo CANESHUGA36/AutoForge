@@ -38,6 +38,13 @@ RUN playwright install --with-deps chromium
 COPY *.py ./
 COPY skills/ ./skills/
 COPY harness/ ./harness/
+COPY tools/ ./tools/
+COPY prompts/ ./prompts/
+COPY config.py ./
+COPY context.py ./
+COPY dashboard.py ./
+COPY eval_cache.py ./
+COPY workspace_state.py ./
 
 # Default parent dir for timestamped project folders (must match compose volume).
 ENV HARNESS_PROJECTS_DIR=/projects
