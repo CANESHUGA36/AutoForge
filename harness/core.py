@@ -377,4 +377,26 @@ class Harness:
         browser_tester: Agent,
         contract_ref: str,
     ) -> tuple[str, dict, str, dict]:
-        """"""
+        """Run CodeReviewer and BrowserTester in parallel via ThreadPoolExecutor.
+
+        Returns (code_review_result, code_review_usage, browser_result, browser_usage).
+        """
+        code_task = (
+            f"Review the codebase against the acceptance criteria in {contract_ref}.\n"
+            f"Read the contract, then examine all relevant source files in the workspace.\n"
+            f"Output a concise report with files examined, critical issues, warnings, "
+            f"and feature coverage estimate."
+        )
+        browser_task = (
+            f"Test the web app against the functional criteria in {contract_ref}.\n"
+            f"Start the dev server using start_dev_server(), then run browser tests.\n"
+            f"Report PASS/FAIL for each criterion with concrete evidence."
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_cr = executor.submit(code_reviewer.run_with_stats, code_task)
+            future_bt = executor.submit(browser_tester.run_with_stats, browser_task)
+
+        code_review_result, code_review_usage = future_cr.result()
+        browser_result, browser_usage = future_bt.result()
+        return code_review_result, code_review_usage, browser_result, browser_usage
