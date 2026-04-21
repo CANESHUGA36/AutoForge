@@ -219,18 +219,8 @@ class Dashboard:
             self.state.agent_elapsed_s = now - self._agent_start_time
     
     def _flush(self) -> None:
-        """将状态写入文件并输出日志"""
+        """将状态写入日志（不再单独写 .dashboard_state.json，状态已并入 harness_state.json）。"""
         self._update_timers()
-        
-        # 写入 JSON 状态文件
-        try:
-            state_path = self.workspace / ".dashboard_state.json"
-            state_path.write_text(
-                json.dumps(self.state.to_dict(), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            log.debug(f"[dashboard] Failed to write state: {e}")
         
         # 输出到日志（每轮或关键事件时）
         if self.state.phase in ("done", "failed") or self.state.agent_status in ("error", "timeout"):
@@ -243,27 +233,34 @@ class Dashboard:
 
 
 def load_dashboard_state(workspace: str) -> DashboardState | None:
-    """从 workspace 加载 Dashboard 状态（外部监控用）"""
-    path = Path(workspace) / ".dashboard_state.json"
+    """从 harness_state.json 加载 Dashboard 状态（外部监控用）。
+    
+    Dashboard 状态已并入 harness_state.json，不再单独维护 .dashboard_state.json。
+    """
+    import config
+    path = Path(workspace) / config.STATE_FILE
     if not path.exists():
         return None
     
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        dash_data = data.get("dashboard", {})
+        if not dash_data:
+            return None
         state = DashboardState()
-        state.workspace = data.get("workspace", "")
-        state.round_num = data.get("round", 0)
-        state.phase = data.get("phase", "idle")
-        state.current_agent = data.get("current_agent", "")
-        state.agent_status = data.get("agent_status", "")
-        state.agent_elapsed_s = data.get("agent_elapsed_s", 0)
-        state.sprint_scores = data.get("sprint_scores", [])
-        state.overall_scores = data.get("overall_scores", [])
-        state.total_prompt_tokens = data.get("total_prompt_tokens", 0)
-        state.total_completion_tokens = data.get("total_completion_tokens", 0)
-        state.round_elapsed_s = data.get("round_elapsed_s", 0)
-        state.total_elapsed_s = data.get("total_elapsed_s", 0)
-        state.alerts = data.get("alerts", [])
+        state.workspace = dash_data.get("workspace", workspace)
+        state.round_num = dash_data.get("round", 0)
+        state.phase = dash_data.get("phase", "idle")
+        state.current_agent = dash_data.get("current_agent", "")
+        state.agent_status = dash_data.get("agent_status", "")
+        state.agent_elapsed_s = dash_data.get("agent_elapsed_s", 0)
+        state.sprint_scores = dash_data.get("sprint_scores", [])
+        state.overall_scores = dash_data.get("overall_scores", [])
+        state.total_prompt_tokens = dash_data.get("total_prompt_tokens", 0)
+        state.total_completion_tokens = dash_data.get("total_completion_tokens", 0)
+        state.round_elapsed_s = dash_data.get("round_elapsed_s", 0)
+        state.total_elapsed_s = dash_data.get("total_elapsed_s", 0)
+        state.alerts = dash_data.get("alerts", [])
         return state
     except Exception:
         return None

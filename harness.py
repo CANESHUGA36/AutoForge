@@ -21,9 +21,9 @@ import config
 from agents import Agent
 from prompts import (
     PLANNER_SYSTEM, BUILDER_SYSTEM, EVALUATOR_SYSTEM,
-    CONTRACT_BUILDER_SYSTEM, CONTRACT_REVIEWER_SYSTEM,
+    CONTRACT_BUILDER_SYSTEM,
     SPRINT_PLANNER_SYSTEM,
-    SPRINT_CONTRACT_BUILDER_SYSTEM, SPRINT_CONTRACT_REVIEWER_SYSTEM,
+    SPRINT_CONTRACT_BUILDER_SYSTEM,
     CODE_REVIEWER_SYSTEM, BROWSER_TESTER_SYSTEM,
 )
 from tools import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
@@ -45,20 +45,27 @@ class Harness:
         self.workspace.mkdir(parents=True, exist_ok=True)
         # 同步到 config.WORKSPACE，确保 tools._resolve() 使用正确的工作目录
         config.WORKSPACE = str(self.workspace.resolve())
+        
+        # 为当前实例创建独立的 Logger
+        self.log = logging.getLogger(f"harness.{id(self)}")
+        self.log.setLevel(logging.INFO)
+        # 避免日志向上传播到根 logger（防止重复输出）
+        self.log.propagate = False
+        
         self._init_git()
         self._setup_file_logging()
 
         # 创建 Agent
-        self.planner = Agent("Planner", PLANNER_SYSTEM, TOOL_SCHEMAS)
-        self.sprint_planner = Agent("SprintPlanner", SPRINT_PLANNER_SYSTEM, TOOL_SCHEMAS)
-        self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS, use_state=True)
-        self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, use_state=True)
+        self.planner = Agent("Planner", PLANNER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
+        self.sprint_planner = Agent("SprintPlanner", SPRINT_PLANNER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
+        self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS, use_state=True, logger=self.log)
+        self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, use_state=True, logger=self.log)
 
         self.score_history: list[float] = []          # 保留兼容旧 state
         self.sprint_score_history: list[float] = []     # 本轮 Sprint 质量（基于 sprint_contract）
         self.overall_score_history: list[float] = []    # 全局质量（基于 contract.md，加权计算）
-        # 与 score_history 下标严格对齐：commit_history[i] 对应第 i 轮的 (round_num, hash)
-        self.commit_history: list[tuple[int, str]] = []
+        # commit_history 改为运行时从 git log 动态读取，不再持久化维护
+        self.commit_history: list[tuple[int, str]] = []  # 运行时缓存，不持久化
 
         # Strategy decisions declared by the Builder at the end of each round.
         # Each entry is a dict: {"strategy": "REFINE"|"PIVOT", "reason": str, "new_direction": str|None}
@@ -101,19 +108,20 @@ class Harness:
             "score_history": self.score_history,
             "sprint_score_history": self.sprint_score_history,
             "overall_score_history": self.overall_score_history,
-            # commit_history entries are (round_num, hash) tuples — serialise as lists
-            "commit_history": [list(e) for e in self.commit_history],
+            # commit_history removed — now read from git log dynamically
             "strategy_history": self.strategy_history,
             "token_totals": self.token_totals,
             "round_stats": self.round_stats,
+            # dashboard state merged into harness_state
+            "dashboard": self.dashboard.state.to_dict() if hasattr(self, 'dashboard') else {},
         }
         tmp = self._state_path().with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
             tmp.replace(self._state_path())
-            log.debug(f"[state] Saved to {config.STATE_FILE}")
+            self.log.debug(f"[state] Saved to {config.STATE_FILE}")
         except Exception as e:
-            log.warning(f"[state] Failed to save state: {e}")
+            self.log.warning(f"[state] Failed to save state: {e}")
 
     def _load_state(self) -> None:
         """Load persisted state if STATE_FILE exists.
@@ -135,19 +143,19 @@ class Harness:
                 self.sprint_score_history = list(self.score_history)
             if not self.overall_score_history and self.score_history:
                 self.overall_score_history = list(self.score_history)
-            self.commit_history = [tuple(e) for e in state.get("commit_history", [])]
+            # commit_history removed — now read from git log dynamically
             self.strategy_history = state.get("strategy_history", [])
             self.token_totals = state.get("token_totals", {"prompt": 0, "completion": 0})
             self.round_stats = state.get("round_stats", [])
             self._resumed = True
             last_overall = self.overall_score_history[-1] if self.overall_score_history else 'n/a'
-            log.info(
+            self.log.info(
                 f"[state] Resumed from {config.STATE_FILE} — "
                 f"{self._completed_rounds} round(s) already completed, "
                 f"last overall: {last_overall}"
             )
         except Exception as e:
-            log.warning(f"[state] Could not load state (will start fresh): {e}")
+            self.log.warning(f"[state] Could not load state (will start fresh): {e}")
 
     def _clear_state(self) -> None:
         """Remove STATE_FILE after a successful run so the workspace is clean."""
@@ -155,24 +163,46 @@ class Harness:
         try:
             if path.exists():
                 path.unlink()
-                log.debug(f"[state] Cleared {config.STATE_FILE}")
+                self.log.debug(f"[state] Cleared {config.STATE_FILE}")
         except Exception as e:
-            log.warning(f"[state] Could not remove state file: {e}")
+            self.log.warning(f"[state] Could not remove state file: {e}")
 
     def _setup_file_logging(self):
         """为当前 workspace 设置独立的文件日志 Handler，支持实时监控。"""
-        log_path = self.workspace / "harness.log"
-        # 避免重复添加（恢复运行时可能重新实例化 Harness）
-        for h in log.handlers:
-            if isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', None) == str(log_path):
-                return
+        log_dir = self.workspace / "logs"
+        log_dir.mkdir(exist_ok=True)
+        
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        log_path = log_dir / f"harness-{timestamp}.log"
+        
+        # 清理该 logger 已有的 Handler（避免恢复运行时重复）
+        for h in list(self.log.handlers):
+            self.log.removeHandler(h)
+            h.close()
+        
         file_handler = logging.FileHandler(log_path, encoding="utf-8", mode="a")
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         ))
-        log.addHandler(file_handler)
-        log.info(f"[logging] File logging enabled: {log_path}")
+        self.log.addHandler(file_handler)
+        
+        # 同时输出到控制台
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        ))
+        self.log.addHandler(console_handler)
+        
+        self.log.info(f"[logging] File logging enabled: {log_path}")
+        
+        # 更新 harness.log 指向最新日志
+        latest_link = self.workspace / "harness.log"
+        try:
+            latest_link.write_text(str(log_path), encoding="utf-8")
+        except Exception:
+            pass
 
     def _init_git(self):
         """初始化 git"""
@@ -193,15 +223,15 @@ class Harness:
         - Phase 2 (Contract) is skipped when contract.md already exists.
         - Already-completed rounds are skipped; the loop starts from the next round.
         """
-        log.info("="*60)
-        log.info("Harness %s", "resuming" if self._resumed else "starting")
-        log.info("="*60)
-        log.info(f"Workspace: {self.workspace}")
-        log.info(f"Prompt: {user_prompt}")
+        self.log.info("="*60)
+        self.log.info("Harness %s", "resuming" if self._resumed else "starting")
+        self.log.info("="*60)
+        self.log.info(f"Workspace: {self.workspace}")
+        self.log.info(f"Prompt: {user_prompt}")
         if self._resumed:
             last_sprint = self.sprint_score_history[-1] if self.sprint_score_history else 'n/a'
             last_overall = self.overall_score_history[-1] if self.overall_score_history else 'n/a'
-            log.info(
+            self.log.info(
                 f"Resuming from round {self._completed_rounds + 1} "
                 f"(completed: {self._completed_rounds}, "
                 f"last sprint: {last_sprint}, last overall: {last_overall})"
@@ -212,11 +242,11 @@ class Harness:
 
         # Phase 1: Plan — skip if spec.md already exists (resumed run)
         if spec_path.exists():
-            log.info("Phase 1: Plan — SKIPPED (spec.md already exists)")
+            self.log.info("Phase 1: Plan — SKIPPED (spec.md already exists)")
         else:
-            log.info("\n" + "="*60)
-            log.info("Phase 1: Plan")
-            log.info("="*60)
+            self.log.info("\n" + "="*60)
+            self.log.info("Phase 1: Plan")
+            self.log.info("="*60)
 
             self.planner.run(
                 f"Create a product specification for:\n\n{user_prompt}\n\n"
@@ -224,27 +254,27 @@ class Harness:
             )
 
             if not spec_path.exists():
-                log.error("Planner failed to create spec.md — check if the model triggered write_file")
+                self.log.error("Planner failed to create spec.md — check if the model triggered write_file")
                 return {"success": False, "error": "Planner failed to create spec", "rounds": 0, "score": 0}
 
-            log.info("Spec created successfully")
+            self.log.info("Spec created successfully")
 
         # Phase 2: Contract — skip if contract.md already exists (resumed run)
         if contract_path.exists():
-            log.info("Phase 2: Contract — SKIPPED (contract.md already exists)")
+            self.log.info("Phase 2: Contract — SKIPPED (contract.md already exists)")
         else:
-            log.info("\n" + "="*60)
-            log.info("Phase 2: Contract")
-            log.info("="*60)
+            self.log.info("\n" + "="*60)
+            self.log.info("Phase 2: Contract")
+            self.log.info("="*60)
             self._negotiate_contract()
 
         # Phase 3+: Build-Evaluate loop — start from the next unfinished round
         self.dashboard.start_run()
         start_round = self._completed_rounds + 1
         for round_num in range(start_round, config.MAX_ROUNDS + 1):
-            log.info("\n" + "="*60)
-            log.info(f"Round {round_num}/{config.MAX_ROUNDS}")
-            log.info("="*60)
+            self.log.info("\n" + "="*60)
+            self.log.info(f"Round {round_num}/{config.MAX_ROUNDS}")
+            self.log.info("="*60)
 
             self.dashboard.start_round(round_num)
             score = self._build_round(round_num)
@@ -256,7 +286,7 @@ class Harness:
             self._save_state()
 
             if score >= config.PASS_THRESHOLD:
-                log.info(f"\n🎉 Success! Final overall score: {score}")
+                self.log.info(f"\n🎉 Success! Final overall score: {score}")
                 self._log_final_stats()
                 self._clear_state()
                 self.dashboard.end_run(success=True)
@@ -267,7 +297,7 @@ class Harness:
                 }
 
             if round_num < config.MAX_ROUNDS:
-                log.info(f"Overall score {score:.1f} below threshold {config.PASS_THRESHOLD}, continuing...")
+                self.log.info(f"Overall score {score:.1f} below threshold {config.PASS_THRESHOLD}, continuing...")
 
         self._log_final_stats()
         # Leave STATE_FILE in place on failure so the run can be resumed or inspected.
@@ -283,14 +313,14 @@ class Harness:
 
     def _negotiate_contract(self):
         """协商验收标准（精简版：单次生成，跳过Reviewer循环）"""
-        proposer = Agent("ContractProposer", CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS)
-        log.info("Contract generation (single-pass)")
+        proposer = Agent("ContractProposer", CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
+        self.log.info("Contract generation (single-pass)")
         proposer.run(f"Read {config.SPEC_FILE} and create acceptance criteria in {config.CONTRACT_FILE}")
-        log.info("Contract created")
+        self.log.info("Contract created")
 
     def _plan_sprint(self, round_num: int) -> None:
         """在 Builder 启动前，由 Sprint Planner 生成本轮聚焦的任务清单（sprint.md）。"""
-        log.info("Sprint planning phase")
+        self.log.info("Sprint planning phase")
         feedback_hint = ""
         sprint_path = self.workspace / config.SPRINT_FILE
         feedback_path = self.workspace / config.FEEDBACK_FILE
@@ -316,7 +346,7 @@ class Harness:
         self.sprint_planner.run(task)
 
         if not sprint_path.exists():
-            log.warning("SprintPlanner did not create sprint.md, Builder will fall back to spec.md")
+            self.log.warning("SprintPlanner did not create sprint.md, Builder will fall back to spec.md")
 
     def _negotiate_sprint_contract(self, round_num: int) -> None:
         """生成本轮 Sprint 的验收合同（精简版：单次生成，无Reviewer循环）。
@@ -324,14 +354,14 @@ class Harness:
         The contract is saved to SPRINT_CONTRACT_FILE and covers only the tasks in sprint.md for
         this round, giving the Evaluator a focused, round-specific Definition of Done.
         """
-        log.info("Sprint contract generation phase")
+        self.log.info("Sprint contract generation phase")
 
         sprint_path = self.workspace / config.SPRINT_FILE
         if not sprint_path.exists():
-            log.warning("sprint.md not found — skipping per-sprint contract")
+            self.log.warning("sprint.md not found — skipping per-sprint contract")
             return
 
-        writer = Agent("SprintContractWriter", SPRINT_CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS)
+        writer = Agent("SprintContractWriter", SPRINT_CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
         writer.run(
             f"Round {round_num}: Read {config.SPRINT_FILE} and {config.CONTRACT_FILE}, "
             f"then write the sprint contract to {config.SPRINT_CONTRACT_FILE}."
@@ -339,9 +369,9 @@ class Harness:
 
         sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
         if sprint_contract_path.exists():
-            log.info("Sprint contract created")
+            self.log.info("Sprint contract created")
         else:
-            log.warning("SprintContractWriter did not create sprint_contract.md")
+            self.log.warning("SprintContractWriter did not create sprint_contract.md")
 
     def _get_head_hash(self) -> str | None:
         """获取当前 HEAD 的 commit hash，若仓库尚无提交则返回 None。"""
@@ -351,6 +381,17 @@ class Harness:
             **config.SUBPROCESS_TEXT_KWARGS,
         )
         return result.stdout.strip() if result.returncode == 0 else None
+
+    def _get_commit_for_round(self, round_num: int) -> str | None:
+        """从 git log 动态查找某轮的 commit hash（替代持久化的 commit_history）。"""
+        result = subprocess.run(
+            ["git", "log", "--format=%H", "--grep", f"round {round_num} snapshot"],
+            cwd=self.workspace, capture_output=True, text=True,
+            **config.SUBPROCESS_TEXT_KWARGS,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().splitlines()[0]
+        return None
 
     def _commit_round(self, round_num: int) -> str | None:
         """在每轮 Build 结束后强制做一次 git 快照，确保即使 Builder 忘记提交也有历史记录。
@@ -362,7 +403,7 @@ class Harness:
             **config.SUBPROCESS_TEXT_KWARGS,
         )
         if not result.stdout.strip():
-            log.info(f"[git] Nothing to commit after round {round_num}")
+            self.log.info(f"[git] Nothing to commit after round {round_num}")
         else:
             subprocess.run(["git", "add", "-A"], cwd=self.workspace, capture_output=True)
             msg = f"harness: round {round_num} snapshot"
@@ -372,23 +413,23 @@ class Harness:
                 **config.SUBPROCESS_TEXT_KWARGS,
             )
             if commit.returncode == 0:
-                log.info(f"[git] Committed round {round_num} snapshot")
+                self.log.info(f"[git] Committed round {round_num} snapshot")
             else:
-                log.warning(f"[git] Commit failed: {commit.stderr.strip()}")
+                self.log.warning(f"[git] Commit failed: {commit.stderr.strip()}")
         return self._get_head_hash()
 
     def _rollback_to(self, commit_hash: str, reason: str) -> None:
         """将 workspace 硬重置到指定 commit，并记录回滚原因到日志。"""
-        log.info(f"[git] Rolling back to {commit_hash[:8]} — {reason}")
+        self.log.info(f"[git] Rolling back to {commit_hash[:8]} — {reason}")
         result = subprocess.run(
             ["git", "reset", "--hard", commit_hash],
             cwd=self.workspace, capture_output=True, text=True,
             **config.SUBPROCESS_TEXT_KWARGS,
         )
         if result.returncode == 0:
-            log.info("[git] Rollback successful")
+            self.log.info("[git] Rollback successful")
         else:
-            log.warning(f"[git] Rollback failed: {result.stderr.strip()}")
+            self.log.warning(f"[git] Rollback failed: {result.stderr.strip()}")
 
     def _build_round(self, round_num: int) -> float:
         """执行一轮 Build-Evaluate"""
@@ -402,9 +443,8 @@ class Harness:
 
         # 检查 1: 上一轮 Sprint 不及格
         if self.sprint_score_history and self.sprint_score_history[-1] < config.SPRINT_PASS_THRESHOLD:
-            if self.commit_history:
-                # 回退到最新 commit（上一轮结束时的状态），强制重做/修复
-                _, latest_hash = self.commit_history[-1]
+            latest_hash = self._get_head_hash()
+            if latest_hash:
                 self._rollback_to(
                     latest_hash,
                     f"Sprint score {self.sprint_score_history[-1]:.1f} below threshold {config.SPRINT_PASS_THRESHOLD}"
@@ -428,8 +468,8 @@ class Harness:
             best_overall = self.overall_score_history[best_idx]
             last_overall = self.overall_score_history[-1]
             if last_overall < best_overall - config.SIGNIFICANT_DROP:
-                if len(self.commit_history) > best_idx:
-                    _, best_hash = self.commit_history[best_idx]
+                best_hash = self._get_commit_for_round(best_idx + 1)
+                if best_hash:
                     self._rollback_to(
                         best_hash,
                         f"Overall dropped {last_overall:.1f} → best was {best_overall:.1f} at round {best_idx + 1}"
@@ -447,7 +487,7 @@ class Harness:
         self._negotiate_sprint_contract(round_num)
 
         # Build
-        log.info("Build phase")
+        self.log.info("Build phase")
         self.dashboard.start_agent("Builder")
         build_task = self._build_build_task(round_num, rollback_msg)
         build_result, build_usage = self.builder.run_with_stats(build_task)
@@ -456,17 +496,15 @@ class Harness:
         # Parse the Builder's strategy declaration from this round's output
         strategy = self._parse_strategy(build_result)
         self.strategy_history.append(strategy)
-        log.info(
+        self.log.info(
             f"Builder strategy: {strategy['strategy']}"
             + (f" — {strategy['reason']}" if strategy['reason'] else "")
         )
         if strategy['strategy'] == 'PIVOT' and strategy.get('new_direction'):
-            log.info(f"  New direction: {strategy['new_direction']}")
+            self.log.info(f"  New direction: {strategy['new_direction']}")
 
         # Harness 层兜底快照，确保即使 Builder 跳过提交也有版本记录
-        head_hash = self._commit_round(round_num)
-        if head_hash:
-            self.commit_history.append((round_num, head_hash))
+        self._commit_round(round_num)
 
         # P2: 构建失败快速回退 —— 如果 Builder 产出了构建错误，直接跳过 Evaluate
         ws_state_path = self.workspace / ".workspace_state.json"
@@ -474,7 +512,7 @@ class Harness:
             try:
                 ws_data = json.loads(ws_state_path.read_text(encoding="utf-8"))
                 if ws_data.get("last_build_status") == "error":
-                    log.warning("[build_gate] Build failed — skipping evaluation and forcing retry")
+                    self.log.warning("[build_gate] Build failed — skipping evaluation and forcing retry")
                     self.dashboard.add_alert(f"Build failed in round {round_num}, skipping eval")
                     # 返回一个低于阈值的分数，强制进入下一轮修复
                     score = config.SPRINT_PASS_THRESHOLD - 0.5
@@ -501,7 +539,7 @@ class Harness:
                     self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
                     return score
             except Exception as e:
-                log.debug(f"[build_gate] Could not check build status: {e}")
+                self.log.debug(f"[build_gate] Could not check build status: {e}")
 
         # Evaluate — 三层分工：CodeReviewer → BrowserTester → Evaluator(打分)
         # 核心价值：子 Agent 的上下文相互隔离，不会污染父 Agent 的 messages 列表
@@ -509,10 +547,10 @@ class Harness:
         contract_ref = config.SPRINT_CONTRACT_FILE if sprint_contract_path.exists() else config.CONTRACT_FILE
 
         # Step 1 & 2: Code Review + Browser Test —— 并行执行
-        log.info("Evaluate phase — Step 1 & 2: Code Review + Browser Test (parallel)")
+        self.log.info("Evaluate phase — Step 1 & 2: Code Review + Browser Test (parallel)")
         self.dashboard.start_agent("CodeReviewer+BrowserTester")
-        code_reviewer = Agent("CodeReviewer", CODE_REVIEWER_SYSTEM, TOOL_SCHEMAS)
-        browser_tester = Agent("BrowserTester", BROWSER_TESTER_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS)
+        code_reviewer = Agent("CodeReviewer", CODE_REVIEWER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
+        browser_tester = Agent("BrowserTester", BROWSER_TESTER_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, logger=self.log)
 
         code_review_result, code_review_usage, browser_result, browser_usage = self._run_eval_parallel(
             code_reviewer, browser_tester, contract_ref
@@ -520,7 +558,7 @@ class Harness:
         self.dashboard.end_agent("success")
 
         # Step 3: Scoring — Evaluator 基于前两者的报告打分
-        log.info("Evaluate phase — Step 3: Scoring")
+        self.log.info("Evaluate phase — Step 3: Scoring")
         self.dashboard.start_agent("Evaluator")
         
         # P2: 使用 EvalCache 生成结构化摘要，替代完整报告截断
@@ -552,7 +590,7 @@ class Harness:
         self.overall_score_history.append(overall_score)
         # 保留兼容：score_history 也记录 overall_score
         self.score_history.append(overall_score)
-        log.info(f"  Sprint score: {sprint_score:.1f}/10 | Overall score: {overall_score:.1f}/10")
+        self.log.info(f"  Sprint score: {sprint_score:.1f}/10 | Overall score: {overall_score:.1f}/10")
 
         # Parse per-dimension scores and log them
         dim_scores = self._parse_dimension_scores(eval_text)
@@ -560,19 +598,19 @@ class Harness:
             for dim, s in sorted(dim_scores.items()):
                 threshold = config.DIMENSION_THRESHOLDS.get(dim, 0)
                 status = "OK" if s >= threshold else "FAIL"
-                log.info(f"  [{status}] {dim}: {s}/10 (threshold {threshold})")
+                self.log.info(f"  [{status}] {dim}: {s}/10 (threshold {threshold})")
         else:
-            log.warning("Could not parse per-dimension scores from evaluator feedback")
+            self.log.warning("Could not parse per-dimension scores from evaluator feedback")
 
         # Hard threshold check: if any dimension is below its threshold, force the round
         # to fail even if the overall score is above PASS_THRESHOLD.
         score = overall_score  # 用于后续判断的分数
         failed_dims = self._check_dimension_thresholds(dim_scores)
         if failed_dims:
-            log.warning(f"Hard threshold(s) failed: {', '.join(failed_dims)}")
+            self.log.warning(f"Hard threshold(s) failed: {', '.join(failed_dims)}")
             # Cap the effective score just below the pass threshold so the loop continues
             if score >= config.PASS_THRESHOLD:
-                log.warning(
+                self.log.warning(
                     f"Overall score {score} would have passed, but dimension hard threshold "
                     f"forces continuation. Effective score capped to {config.PASS_THRESHOLD - 0.1}."
                 )
@@ -641,7 +679,7 @@ class Harness:
             code_review_result, code_review_usage = code_future.result()
             browser_result, browser_usage = browser_future.result()
 
-        log.info(
+        self.log.info(
             f"[parallel_eval] CodeReview: {code_review_usage.get('prompt', 0)}p + {code_review_usage.get('completion', 0)}c | "
             f"BrowserTest: {browser_usage.get('prompt', 0)}p + {browser_usage.get('completion', 0)}c"
         )
@@ -732,7 +770,7 @@ class Harness:
             result["new_direction"] = direction_match.group(1).strip()
 
         if result["strategy"] == "UNKNOWN":
-            log.warning("Builder did not include a STRATEGY declaration — defaulting to REFINE")
+            self.log.warning("Builder did not include a STRATEGY declaration — defaulting to REFINE")
             result["strategy"] = "REFINE"
 
         return result
@@ -751,12 +789,12 @@ class Harness:
         sprint_s = self.sprint_score_history[-1] if self.sprint_score_history else 0.0
         overall_s = self.overall_score_history[-1] if self.overall_score_history else 0.0
 
-        log.info(
+        self.log.info(
             f"[stats] Round {round_num:>2} | sprint {sprint_s:>4.1f} | overall {overall_s:>4.1f} | "
             f"tokens: {prompt_tokens:>6}p + {completion_tokens:>6}c = {total_tokens:>7} | "
             f"elapsed: {elapsed_s:>6.1f}s"
         )
-        log.info(
+        self.log.info(
             f"[stats] Cumulative          | "
             f"tokens: {cum_prompt:>6}p + {cum_completion:>6}c = {cum_total:>7} | "
             f"rounds: {len(self.round_stats)}"
@@ -767,32 +805,32 @@ class Harness:
         if not self.round_stats:
             return
 
-        log.info("\n" + "="*72)
-        log.info("Cost / Time Summary")
-        log.info("="*72)
-        log.info(
+        self.log.info("\n" + "="*72)
+        self.log.info("Cost / Time Summary")
+        self.log.info("="*72)
+        self.log.info(
             f"{'Round':>5} | {'Sprint':>6} | {'Overall':>7} | {'Strategy':>8} | "
             f"{'Prompt':>7} | {'Compl.':>7} | {'Total':>7} | {'Time(s)':>7}"
         )
-        log.info("-"*80)
+        self.log.info("-"*80)
         for i, s in enumerate(self.round_stats):
             total = s["prompt_tokens"] + s["completion_tokens"]
             sprint_s = self.sprint_score_history[i] if i < len(self.sprint_score_history) else 0.0
             overall_s = self.overall_score_history[i] if i < len(self.overall_score_history) else 0.0
-            log.info(
+            self.log.info(
                 f"{s['round']:>5} | {sprint_s:>6.1f} | {overall_s:>7.1f} | {s['strategy']:>8} | "
                 f"{s['prompt_tokens']:>7} | {s['completion_tokens']:>7} | "
                 f"{total:>7} | {s['elapsed_s']:>7.1f}"
             )
-        log.info("-"*72)
+        self.log.info("-"*72)
         grand_total = self.token_totals["prompt"] + self.token_totals["completion"]
         total_time = sum(s["elapsed_s"] for s in self.round_stats)
-        log.info(
+        self.log.info(
             f"{'TOTAL':>5} | {'':>5} | {'':>8} | "
             f"{self.token_totals['prompt']:>7} | {self.token_totals['completion']:>7} | "
             f"{grand_total:>7} | {total_time:>7.1f}"
         )
-        log.info("="*72)
+        self.log.info("="*72)
 
     def _parse_scores(self, text: str) -> tuple[float, float]:
         """Parse SPRINT_SCORE and OVERALL_SCORE from evaluator feedback.
@@ -810,10 +848,10 @@ class Harness:
         legacy_match = re.search(r'SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*10', text, re.IGNORECASE)
         if legacy_match:
             score = float(legacy_match.group(1))
-            log.warning("Legacy single SCORE found — using it for both sprint and overall")
+            self.log.warning("Legacy single SCORE found — using it for both sprint and overall")
             return score, score
 
-        log.warning("Could not parse any score, defaulting to 0")
+        self.log.warning("Could not parse any score, defaulting to 0")
         return 0.0, 0.0
 
     def _parse_dimension_scores(self, text: str) -> dict:
@@ -888,29 +926,29 @@ def main():
 
     # 未手动指定 --workspace 时，自动生成带时间戳的独立目录
     workspace = args.workspace if args.workspace else _make_workspace(args.prompt)
-    log.info(f"Workspace: {workspace}")
+    print(f"Workspace: {workspace}")
 
     # --reset: wipe the state file so the run starts from scratch
     if args.reset:
         state_path = Path(workspace) / config.STATE_FILE
         if state_path.exists():
             state_path.unlink()
-            log.info(f"[state] --reset: deleted {config.STATE_FILE}")
+            print(f"[state] --reset: deleted {config.STATE_FILE}")
 
     harness = Harness(workspace)
     result = harness.run(args.prompt)
 
-    log.info("\n" + "="*60)
-    log.info("Final Result")
-    log.info("="*60)
-    log.info(f"Success: {result['success']}")
-    log.info(f"Score: {result.get('score', 0)}")
-    log.info(f"Rounds: {result.get('rounds', 0)}")
+    harness.log.info("\n" + "="*60)
+    harness.log.info("Final Result")
+    harness.log.info("="*60)
+    harness.log.info(f"Success: {result['success']}")
+    harness.log.info(f"Score: {result.get('score', 0)}")
+    harness.log.info(f"Rounds: {result.get('rounds', 0)}")
     if "token_totals" in result:
         t = result["token_totals"]
-        log.info(f"Total tokens: {t.get('prompt', 0)} prompt + {t.get('completion', 0)} completion")
+        harness.log.info(f"Total tokens: {t.get('prompt', 0)} prompt + {t.get('completion', 0)} completion")
     if "error" in result:
-        log.error(f"Error: {result['error']}")
+        harness.log.error(f"Error: {result['error']}")
 
     return 0 if result['success'] else 1
 

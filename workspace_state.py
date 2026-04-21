@@ -65,11 +65,6 @@ class WorkspaceState:
     last_test_status: str = "unknown"
     test_coverage: float = 0.0
 
-    # 评分历史
-    score_history: list[dict] = field(default_factory=list)
-    last_sprint_score: float = 0.0
-    last_overall_score: float = 0.0
-
     # 当前 Sprint
     current_sprint_goal: str = ""
     current_sprint_tasks: list[str] = field(default_factory=list)
@@ -216,12 +211,6 @@ class WorkspaceState:
             if self.completed_tasks:
                 parts.append(f"Completed: {len(self.completed_tasks)}/{len(self.current_sprint_tasks) + len(self.completed_tasks)}")
 
-        # 评分趋势
-        if self.score_history:
-            recent = self.score_history[-3:]
-            scores_str = " → ".join(f"{s.get('overall', 0):.1f}" for s in recent)
-            parts.append(f"\n### Score Trend: {scores_str}")
-
         # 未解决问题
         if self.open_issues:
             parts.append(f"\n### Open Issues ({len(self.open_issues)})")
@@ -246,7 +235,6 @@ class WorkspaceState:
             "current_sprint_goal": self.current_sprint_goal,
             "completed_tasks": self.completed_tasks,
             "open_issues": self.open_issues,
-            "score_history": self.score_history[-5:],
         }
 
     def save(self, workspace: str) -> None:
@@ -273,7 +261,7 @@ class WorkspaceState:
             state.current_sprint_goal = data.get("current_sprint_goal", "")
             state.completed_tasks = data.get("completed_tasks", [])
             state.open_issues = data.get("open_issues", [])
-            state.score_history = data.get("score_history", [])
+            # score_history removed — scores are tracked in harness_state.json only
             return state
         except Exception as e:
             log.warning(f"[state] Failed to load workspace state: {e}")

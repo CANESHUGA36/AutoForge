@@ -259,20 +259,22 @@ def list_files(directory: str = ".", use_cache: bool = True) -> str:
 
 
 def run_bash(command: str, timeout: int = 900) -> str:
-    """执行 bash 命令（修复 PIPE 死锁 + 后台命令支持 + Windows 兼容）。
+    """执行 bash 命令（修复 PIPE 死锁 + 后台命令支持 + Windows 兼容 + 项目初始化优化）。
 
     关键修复：
     1. 使用 Popen + 线程读取 stdout/stderr，避免 capture_output 导致的 PIPE 死锁
     2. Windows 兼容：不使用 start_new_session（Unix-only），改用 creationflags
     3. 对 npx/npm 初始化命令自动增加 timeout 预算
     4. 输出实时流式收集，防止缓冲区满阻塞子进程
+    5. 项目初始化命令（create-next-app/create-vite）使用 DEVNULL 避免重定向问题
     """
     command = command.strip()
     is_background = command.endswith("&") or " & " in command
-
-    # 自动为项目初始化命令增加 timeout
     cmd_lower = command.lower()
-    if any(kw in cmd_lower for kw in ["create-next-app", "create vite", "npx create"]):
+
+    # 检测项目初始化命令（需要特殊处理）
+    is_project_init = any(kw in cmd_lower for kw in ["create-next-app", "create vite", "npx create"])
+    if is_project_init:
         timeout = max(timeout, 600)
 
     try:
@@ -284,7 +286,6 @@ def run_bash(command: str, timeout: int = 900) -> str:
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
             }
-            # Windows 兼容：使用 CREATE_NEW_PROCESS_GROUP 替代 start_new_session
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             else:
@@ -294,6 +295,42 @@ def run_bash(command: str, timeout: int = 900) -> str:
             time.sleep(2)
             return f"[background] pid {proc.pid}: {command[:80]}"
 
+        # 项目初始化命令：使用 DEVNULL 丢弃输出，避免 PIPE 死锁和重定向问题
+        # 同时避免 shell 重定向语法（如 >nul 2>&1）在跨平台时的不一致行为
+        if is_project_init:
+            kwargs = {
+                "shell": True,
+                "cwd": config.WORKSPACE,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            proc = subprocess.Popen(command, **kwargs)
+
+            # 使用轮询而非 wait(timeout) 来支持更长的实际超时
+            # 因为 Popen.wait() 在某些环境下对超时处理不可靠
+            start_time = time.time()
+            while True:
+                ret = proc.poll()
+                if ret is not None:
+                    break
+                if time.time() - start_time > timeout:
+                    try:
+                        if os.name == "nt":
+                            proc.send_signal(signal.CTRL_BREAK_EVENT)
+                        else:
+                            proc.terminate()
+                        proc.wait(timeout=5)
+                    except Exception:
+                        proc.kill()
+                        proc.wait()
+                    return f"[error] Command timed out after {timeout}s"
+                time.sleep(0.5)
+
+            return "(no output)"
+
         # 普通命令：使用 Popen + 线程读取，避免 PIPE 死锁
         kwargs = {
             "shell": True,
@@ -301,7 +338,6 @@ def run_bash(command: str, timeout: int = 900) -> str:
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
         }
-        # Windows 兼容
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
@@ -317,8 +353,6 @@ def run_bash(command: str, timeout: int = 900) -> str:
             except Exception:
                 pass
 
-        # 启动读取线程
-        import threading
         t_out = threading.Thread(target=_read_stream, args=(proc.stdout, stdout_chunks))
         t_err = threading.Thread(target=_read_stream, args=(proc.stderr, stderr_chunks))
         t_out.start()
@@ -328,7 +362,6 @@ def run_bash(command: str, timeout: int = 900) -> str:
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            # 超时：强制终止
             try:
                 if os.name == "nt":
                     proc.send_signal(signal.CTRL_BREAK_EVENT)
@@ -342,11 +375,9 @@ def run_bash(command: str, timeout: int = 900) -> str:
             t_err.join(timeout=2)
             return f"[error] Command timed out after {timeout}s"
 
-        # 等待读取线程完成
         t_out.join(timeout=5)
         t_err.join(timeout=5)
 
-        # 合并输出
         stdout_bytes = b"".join(stdout_chunks)
         stderr_bytes = b"".join(stderr_chunks)
 
@@ -517,9 +548,9 @@ def search_web(query: str, limit: int = 5) -> str:
         Formatted search results or error message.
     """
     try:
-        api_key = (config.MINIMAX_API_KEY or "").strip()
+        api_key = (config.API_KEY or "").strip()
         if not api_key:
-            return "[error] MINIMAX_API_KEY not set; cannot perform web search"
+            return "[error] OPENAI_API_KEY not set; cannot perform web search"
 
         if not query or not query.strip():
             return "[error] query is required"
@@ -581,9 +612,9 @@ def analyze_image(image_path: str, prompt: str = "Describe this image in detail"
         VLM analysis result or error message.
     """
     try:
-        api_key = (config.MINIMAX_API_KEY or "").strip()
+        api_key = (config.API_KEY or "").strip()
         if not api_key:
-            return "[error] MINIMAX_API_KEY not set; cannot analyze image"
+            return "[error] OPENAI_API_KEY not set; cannot analyze image"
 
         if not image_path or not image_path.strip():
             return "[error] image_path is required"

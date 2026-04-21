@@ -55,6 +55,7 @@ class AgentRunLog:
 
     def emit(self) -> None:
         """输出结构化日志行。"""
+        # 使用模块级 log，因为 AgentRunLog 没有绑定到特定 Agent 实例
         log.info(f"[agent_summary] {json.dumps(self.to_dict(), ensure_ascii=False)}")
 
     def write_jsonl(self, workspace: str) -> None:
@@ -69,13 +70,14 @@ class AgentRunLog:
 class Agent:
     """支持上下文管理的 Agent"""
 
-    def __init__(self, name: str, system_prompt: str, tools: list, use_state: bool = False):
+    def __init__(self, name: str, system_prompt: str, tools: list, use_state: bool = False, logger=None):
         self.name = name
         catalog = skills.build_catalog_prompt()
         self.system_prompt = system_prompt + (f"\n{catalog}" if catalog else "")
         self.tools = tools
         self.use_state = use_state
         self._workspace_state: WorkspaceState | None = None
+        self._log = logger or log
 
     def run(self, user_prompt: str) -> str:
         """Run the agent and return the final text response."""
@@ -104,7 +106,7 @@ class Agent:
         ]
 
         run_log = AgentRunLog(agent_name=self.name)
-        log.info(f"[{self.name}] Agent starting | prompt_len={len(user_prompt)} | state_mode={self.use_state}")
+        self._log.info(f"[{self.name}] Agent starting | prompt_len={len(user_prompt)} | state_mode={self.use_state}")
         start_time = time.time()
         AGENT_TIME_LIMIT_S = 3600
 
@@ -113,7 +115,7 @@ class Agent:
         # 初始化 WorkspaceState（如果启用）
         if self.use_state:
             self._workspace_state = WorkspaceState.load(config.WORKSPACE)
-            log.info(f"[{self.name}] WorkspaceState loaded: {self._workspace_state.total_files} files")
+            self._log.info(f"[{self.name}] WorkspaceState loaded: {self._workspace_state.total_files} files")
 
         for iteration in range(1, config.MAX_ITERATIONS + 1):
             elapsed = time.time() - start_time
@@ -121,7 +123,7 @@ class Agent:
                 run_log.final_status = "timeout"
                 run_log.error = f"exceeded {AGENT_TIME_LIMIT_S}s"
                 run_log.emit()
-                log.error(
+                self._log.error(
                     f"[{self.name}] exceeded {AGENT_TIME_LIMIT_S}s time limit ({elapsed:.0f}s). Aborting."
                 )
                 return f"[error] Agent exceeded {AGENT_TIME_LIMIT_S}s time limit", usage
@@ -130,7 +132,7 @@ class Agent:
             messages = self._check_context_lifecycle(messages)
             token_count = context.count_tokens(messages)
 
-            log.info(
+            self._log.info(
                 f"[{self.name}] Iteration {iteration}/{config.MAX_ITERATIONS} | "
                 f"elapsed: {elapsed:.0f}s | "
                 f"tokens: {usage['prompt']}p + {usage['completion']}c | "
@@ -150,7 +152,7 @@ class Agent:
                 run_log.final_status = "llm_error"
                 run_log.error = str(e)
                 run_log.emit()
-                log.error(f"[{self.name}] LLM call failed: {e}")
+                self._log.error(f"[{self.name}] LLM call failed: {e}")
                 return f"[error] LLM call failed: {e}", usage
 
             llm_latency = time.time() - llm_start
@@ -167,14 +169,14 @@ class Agent:
             # 记录 LLM 回复摘要
             if message.content:
                 content_preview = message.content[:200].replace("\n", " ")
-                log.info(f"[{self.name}] Assistant ({llm_latency:.2f}s): {content_preview}...")
+                self._log.info(f"[{self.name}] Assistant ({llm_latency:.2f}s): {content_preview}...")
 
             # 记录 Tool Calls（关键！）
             if message.tool_calls:
                 for tc in message.tool_calls:
                     fn = tc.function
                     args_preview = fn.arguments[:500]
-                    log.info(
+                    self._log.info(
                         f"[{self.name}] Tool call: {fn.name} | "
                         f"args: {args_preview}{'...' if len(fn.arguments) > 500 else ''}"
                     )
@@ -217,7 +219,7 @@ class Agent:
                 # 结果摘要
                 result_preview = result[:300].replace("\n", " ")
                 status = "error" if result.startswith("[error]") else "ok"
-                log.info(
+                self._log.info(
                     f"[{self.name}] Tool result: {name} | "
                     f"status: {status} | "
                     f"latency: {tool_latency:.2f}s | "
@@ -253,7 +255,7 @@ class Agent:
 
         # 策略1: 极端情况 —— checkpoint + 重置
         if token_count > config.RESET_THRESHOLD or context.detect_anxiety(messages):
-            log.warning(
+            self._log.warning(
                 f"[{self.name}] Context reset triggered ({token_count} tokens) | "
                 f"action: checkpoint + restore"
             )
@@ -262,7 +264,7 @@ class Agent:
 
         # 策略2: 压缩历史
         elif token_count > config.COMPRESS_THRESHOLD:
-            log.info(
+            self._log.info(
                 f"[{self.name}] Context compaction triggered ({token_count} tokens) | "
                 f"threshold: {config.COMPRESS_THRESHOLD}"
             )
@@ -270,7 +272,7 @@ class Agent:
 
         # 策略3: WorkspaceState 分层（P2）—— 用状态摘要替代工具返回
         elif self.use_state and self._workspace_state is not None and token_count > config.COMPRESS_THRESHOLD * 0.6:
-            log.info(
+            self._log.info(
                 f"[{self.name}] State injection triggered ({token_count} tokens) | "
                 f"replacing tool returns with state summary"
             )
