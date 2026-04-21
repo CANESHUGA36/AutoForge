@@ -95,13 +95,38 @@ def read_file(path: str) -> str:
 
 
 def _auto_validate_build(path: str) -> str:
-
     """"""
+    if not any(path.endswith(ext) for ext in _BUILDABLE_EXTENSIONS):
+        return ""
+    ws = Path(config.WORKSPACE)
+    if (ws / "package.json").exists():
+        quick_check = "npx tsc --noEmit 2>&1 | head -20"
+        result = run_bash(quick_check, timeout=60)
+        if "error" in result.lower() and "0 errors" not in result.lower():
+            pass
+        build_result = run_bash("npm run build 2>&1 | tail -30", timeout=180)
+        if "error" in build_result.lower() or "failed" in build_result.lower():
+            if "0 errors" not in build_result.lower():
+                return f"\n[BUILD WARNING] Production build has errors:\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
+        if "compiled successfully" in build_result.lower() or "build succeeded" in build_result.lower():
+            return "\n[BUILD OK] Production build succeeded."
+    elif (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
+        pass
+    return ""
 
 
 def write_file(path: str, content: str) -> str:
-
     """"""
+    try:
+        if not path or not path.strip():
+            return "[error] Empty file path"
+        p = _resolve(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        build_status = _auto_validate_build(path)
+        return f"Wrote {len(content)} chars to {path}{build_status}"
+    except Exception as e:
+        return f"[error] {e}"
 
 
 def edit_file(path: str, old_string: str, new_string: str) -> str:
