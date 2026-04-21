@@ -6,6 +6,8 @@ Usage:
     python run.py "Build a pomodoro timer web app"
 """
 import sys
+import os
+from pathlib import Path
 from harness.core import Harness
 
 
@@ -16,8 +18,24 @@ def main() -> int:
         return 1
 
     prompt = sys.argv[1]
-    harness = Harness()
-    harness.run(prompt)
+    
+    # Create timestamped workspace under projects/
+    projects_dir = Path(os.environ.get("HARNESS_PROJECTS_DIR", "./projects"))
+    timestamp = Path(__file__).stem if False else __import__('datetime').datetime.now().strftime("%Y%m%d-%H%M%S")
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    
+    # Create a safe directory name from the prompt
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in prompt[:40]).strip("-").lower()
+    workspace = projects_dir / f"{safe_name}-{timestamp}"
+    workspace.mkdir(parents=True, exist_ok=True)
+    
+    harness = Harness(str(workspace))
+    result = harness.run(prompt)
+    
+    print(f"\n=== Build Complete ===")
+    print(f"Workspace: {workspace}")
+    print(f"Result: {result}")
     return 0
 
 
