@@ -232,7 +232,7 @@ class Harness:
                     )
         # Sprint    
         plan_sprint(self.workspace, round_num, self.sprint_planner, self.log)
-        negotiate_sprint_contract(self.workspace, round_num, self.log)
+        negotiate_contract(self.workspace, round_num, self.log)
         # Build
         self.log.info("Build phase")
         self.dashboard.start_agent("Builder")
