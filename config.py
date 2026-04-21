@@ -73,5 +73,25 @@ PROGRESS_FILE = "progress.md"
 SPRINT_FILE = "sprint.md"
 STATE_FILE = "harness_state.json"
 
+# Dev Server 配置
+DEV_SERVER_PORTS = {
+    "nextjs": 3000,
+    "vite": 5173,
+    "static": 3000,
+}
+DEV_SERVER_DEFAULT_WAIT = 10  # 启动后等待秒数
+DEV_SERVER_HEALTH_CHECK_TIMEOUT = 10  # curl 健康检查超时
+DEV_SERVER_MAX_WAIT = 30  # Harness 层验证最大等待时间
+
+# 超时配置（秒）
+TIMEOUT_TOOL_DEFAULT = 120
+TIMEOUT_AGENT = 3600
+TIMEOUT_PROJECT_INIT = 600
+TIMEOUT_BUILD = 180
+TIMEOUT_QUICK_CHECK = 60
+TIMEOUT_BROWSER_TEST = 120
+TIMEOUT_BROWSER_GOTO = 15
+TIMEOUT_BROWSER_ACTION = 5
+
 # Use UTF-8 for subprocess text mode; Windows default (e.g. cp936) breaks on UTF-8 bytes from npm/node/git.
 SUBPROCESS_TEXT_KWARGS = {"encoding": "utf-8", "errors": "replace"}
