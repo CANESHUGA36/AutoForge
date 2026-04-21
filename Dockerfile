@@ -37,6 +37,7 @@ RUN playwright install --with-deps chromium
 # --- Project source ---
 COPY *.py ./
 COPY skills/ ./skills/
+COPY harness/ ./harness/
 
 # Default parent dir for timestamped project folders (must match compose volume).
 ENV HARNESS_PROJECTS_DIR=/projects
@@ -46,4 +47,4 @@ RUN mkdir -p /projects
 RUN git config --global user.email "harness@autoforge" \
     && git config --global user.name "AutoForge"
 
-CMD ["python", "harness.py"]
+CMD ["python", "run.py"]
