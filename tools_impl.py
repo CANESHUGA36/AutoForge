@@ -192,9 +192,15 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 
 def _should_exclude(path: Path, workspace: Path, excludes: set[str]) -> bool:
-
     """"""
-
+    rel_str = str(path.relative_to(workspace))
+    parts = rel_str.split(os.sep)
+    for part in parts:
+        if part in excludes:
+            return True
+        if any(part.endswith(ext.lstrip("*")) for ext in excludes if ext.startswith("*")):
+            return True
+    return False
 
 def list_files(directory: str = ".", use_cache: bool = True) -> str:
     """"""
@@ -397,9 +403,11 @@ def run_bash(command: str, timeout: int = 900) -> str:
 
 
 def _get_minimax_base_url() -> str:
-
     """"""
-
+    base = getattr(config, "BASE_URL", "")
+    if "minimaxi.com" in base:
+        return "https://api.minimaxi.com"
+    return "https://api.minimax.io"
 
 def generate_image(
 
@@ -823,14 +831,19 @@ _dev_server_proc = None
 
 
 def _kill_port(port: int) -> None:
-
     """"""
-
+    if os.name == "nt":
+        run_bash(
+            f'for /f "tokens=5" %a in ("netstat -ano ^| findstr :{port}") do taskkill /F /PID %a 2>nul',
+            timeout=10,
+        )
+    else:
+        run_bash(f"fuser -k {port}/tcp 2>/dev/null || lsof -ti:{port} | xargs kill -9 2>/dev/null; echo done", timeout=10)
 
 def _kill_dev_server() -> None:
-
     """"""
-
+    _kill_port(3000)
+    _kill_port(5173)
 
 def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int = 10) -> str:
     ws = Path(config.WORKSPACE)
@@ -874,26 +887,6 @@ def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int =
         return f"[error] Health check failed: {e}"
 
 
-
-def _browser_test_impl(
-
-    url: str,
-
-    actions: list | None = None,
-
-    screenshot: bool = True,
-
-    start_command: str | None = None,
-
-    port: int = 5173,
-
-    startup_wait: int = 8,
-
-    viewport: dict | None = None,
-
-) -> str:
-
-    """"""
 
 
 def _smart_truncate_browser_result(result: str, max_chars: int = 4000) -> str:
