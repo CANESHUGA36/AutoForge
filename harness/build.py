@@ -80,25 +80,47 @@ def build_build_task(
 
 
 def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -> tuple[bool, str]:
-    """Harness 层 dev server 验证。
+    """Harness-level dev server verification.
 
-    TODO: 当前仅通过 .workspace_state.json 的 build_status 判断。
-    完整实现应启动 dev server 并轮询 HTTP 200 + 内容验证。
+    First checks .workspace_state.json for build errors, then performs
+    an actual HTTP health check against localhost:{port}.
 
     Returns:
         (success, message)
     """
+    import urllib.request
+
     port = port or config.DEV_SERVER_PORTS["nextjs"]
     max_wait = max_wait or config.DEV_SERVER_MAX_WAIT
 
+    # Step 1: Check workspace state for known build errors
     ws_state_path = workspace / ".workspace_state.json"
     if ws_state_path.exists():
         try:
             ws_data = json.loads(ws_state_path.read_text(encoding="utf-8"))
             if ws_data.get("last_build_status") == "error":
                 return False, "Build status is error (from workspace state)"
-            if ws_data.get("last_build_status") == "ok":
-                return True, f"Build OK (port {port})"
         except Exception:
             pass
-    return True, "No build status available, proceeding"
+
+    # Step 2: Actual HTTP health check with polling
+    url = f"http://localhost:{port}"
+    start = time.time()
+    import time as _time
+    while _time.time() - start < max_wait:
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    return True, f"Dev server responding on port {port} (HTTP 200)"
+                elif resp.status >= 500:
+                    return False, f"Dev server error on port {port} (HTTP {resp.status})"
+        except urllib.error.HTTPError as e:
+            if e.code >= 500:
+                return False, f"Dev server error on port {port} (HTTP {e.code})"
+            # 404 or other client errors might mean server is starting
+        except Exception:
+            pass
+        _time.sleep(1)
+
+    return False, f"Dev server not responding on port {port} after {max_wait}s"

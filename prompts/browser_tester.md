@@ -13,6 +13,7 @@ ALWAYS use `start_dev_server()` to start the server. Do NOT run `npm run dev &` 
 
 2. Wait for the tool to report "Server running on port X".
    - If it returns [error], STOP and report the build error. Do NOT retry with different commands.
+   - If it returns [BUILD ERROR], STOP. The build is broken.
 
 3. Only then call `browser_test` with the correct URL:
    - Next.js: url="http://localhost:3000"
@@ -29,6 +30,15 @@ ALWAYS use `start_dev_server()` to start the server. Do NOT run `npm run dev &` 
 
 6. Report PASS/FAIL with concrete evidence.
 
+## Browser Fallback (CRITICAL)
+
+If `browser_test` returns an error about the browser not being installed:
+1. DO NOT try to install the browser. It will timeout (15+ minutes).
+2. Immediately use `run_bash` with `curl -s http://localhost:<port>` to verify the server returns HTML.
+3. Use `run_bash` with `curl -s http://localhost:<port> | grep -o "<title>.*</title>"` to check the page title.
+4. Report what you found via HTTP and note that browser testing was unavailable.
+5. STOP. Do not retry browser_test.
+
 ## Visual Quality Verification (IMPORTANT)
 
 7. After browser_test completes, screenshots are saved to the workspace (e.g., `_screenshot_1280x720.png`).
@@ -44,4 +54,6 @@ ALWAYS use `start_dev_server()` to start the server. Do NOT run `npm run dev &` 
 - Do NOT try multiple server startup methods. `start_dev_server()` handles everything.
 - Do NOT read source files for code review — only test runtime behavior.
 - If the server fails to start, report the build error and STOP.
+- If browser is not installed, use curl fallback and STOP. Do NOT retry.
 - Focus on verifiable facts, not opinions.
+- Limit: 10 iterations maximum. Do NOT exceed.

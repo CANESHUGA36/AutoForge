@@ -307,19 +307,24 @@ def browser_test_mcp(
     screenshot: bool = True,
     viewport: dict | None = None,
 ) -> str:
-    """同步包装：调用 Playwright MCP bridge 执行 browser_test。"""
-    bridge = PlaywrightMCPBridge()
+    """同步包装：调用 Playwright MCP bridge 执行 browser_test。
+    
+    复用全局 _bridge 实例以避免每次调用都重新启动 MCP server。
+    """
+    bridge = _get_bridge()
     try:
         result = asyncio.run(bridge.browser_test(url, actions, screenshot, viewport))
         return result
     except Exception as e:
         log.warning(f"[playwright_mcp] browser_test failed: {e}")
-        return f"[error] Browser test failed: {e}"
-    finally:
+        # On failure, close and reset bridge so next call starts fresh
         try:
             asyncio.run(bridge.close())
         except Exception:
             pass
+        global _bridge
+        _bridge = None
+        return f"[error] Browser test failed: {e}"
 
 
 def browser_evaluate_mcp(
@@ -327,19 +332,24 @@ def browser_evaluate_mcp(
     url: str | None = None,
     viewport: dict | None = None,
 ) -> str:
-    """同步包装：调用 Playwright MCP bridge 执行 browser_evaluate。"""
-    bridge = PlaywrightMCPBridge()
+    """同步包装：调用 Playwright MCP bridge 执行 browser_evaluate。
+    
+    复用全局 _bridge 实例以避免每次调用都重新启动 MCP server。
+    """
+    bridge = _get_bridge()
     try:
         result = asyncio.run(bridge.browser_evaluate(script, url, viewport))
         return result
     except Exception as e:
         log.warning(f"[playwright_mcp] browser_evaluate failed: {e}")
-        return f"[error] browser_evaluate failed: {e}"
-    finally:
+        # On failure, close and reset bridge so next call starts fresh
         try:
             asyncio.run(bridge.close())
         except Exception:
             pass
+        global _bridge
+        _bridge = None
+        return f"[error] browser_evaluate failed: {e}"
 
 
 def close_mcp_bridge() -> None:

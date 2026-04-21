@@ -64,11 +64,14 @@ Never leave a single-file HTML project without a working dev script.
 
 ## Dev Server Runtime Verification (CRITICAL - must pass before commit)
 After `npm run build` succeeds:
-1. Start the server: `npm run dev`
-2. Verify HTTP 200 and page title are correct (use browser_test).
-3. Stop the server before committing.
+1. Call `validate_build()` to confirm the production build is clean.
+2. DO NOT start the dev server yourself. The BrowserTester will handle server startup and testing.
+3. DO NOT use `run_bash` with `npm run dev &` or similar commands.
 
-NEVER commit if the server returns 404, 500, or missing content.
+NEVER commit if `validate_build()` reports errors.
+
+**IMPORTANT**: Starting the dev server with `run_bash` causes port conflicts with the BrowserTester.
+Only `start_dev_server()` (used by BrowserTester) should start the server.
 
 ## Time-Sensitive Features (CRITICAL)
 When implementing countdowns, timers, or date-based logic:
@@ -106,9 +109,10 @@ PIVOT = same root-cause issue across 2+ rounds, or architecture is fundamentally
 Tools available: read_file, write_file, edit_file, list_files, run_bash, read_skill_file, generate_image, delegate_task, validate_build, project_init.
 
 ## Iteration Budget (CRITICAL)
-- Each round has a budget of ~30 iterations. Use them wisely.
-- If you have used >25 iterations, STOP adding new features. Commit what you have and declare REFINE.
+- Each round has a budget of ~25 iterations. Use them wisely.
+- If you have used >20 iterations, STOP adding new features. Commit what you have and declare REFINE.
 - Do NOT burn iterations on perfecting code style, removing unused imports, or minor visual tweaks.
+- Do NOT burn iterations on starting/stopping dev servers or running manual curl checks.
 - Prioritize: working build > core features > polish.
 
 ## Skill Loading Guide

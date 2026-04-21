@@ -27,22 +27,26 @@ RUN npm install -g serve http-server
 
 # --- Pre-cache project templates (avoid npm create timeouts in container) ---
 RUN mkdir -p /templates && cd /templates && \
-    npm create vite@latest template-vite-react-ts -- --template react-ts 2>&1 || true && \
-    cd template-vite-react-ts && npm install 2>&1 || true && \
+    npm create vite@latest template-vite-react-ts -- --template react-ts && \
+    cd template-vite-react-ts && npm install && \
     cd /templates && \
-    npx create-next-app@latest template-nextjs-app --typescript --tailwind --eslint --app --src-dir --no-turbopack 2>&1 || true && \
-    cd template-nextjs-app && npm install 2>&1 || true && \
+    npx create-next-app@latest template-nextjs-app --typescript --tailwind --eslint --app --src-dir --no-turbopack && \
+    cd template-nextjs-app && npm install && \
     cd /templates && \
     echo "Templates cached" && ls -la
+
+# --- Pre-install Playwright MCP and browser ---
+# This avoids runtime npx download delays and timeouts
+RUN npm install -g @playwright/mcp@latest && \
+    npx playwright install chromium
 
 # --- Python packages ---
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- Playwright browsers ---
+# --- Playwright system dependencies ---
 # --with-deps installs all required OS-level libraries for Chromium.
-# Only install chromium to keep the image lean.
-RUN playwright install --with-deps chromium
+RUN playwright install-deps chromium
 
 # --- Project source ---
 COPY *.py ./

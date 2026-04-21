@@ -214,7 +214,8 @@ class Harness:
                     f"(below threshold {config.SPRINT_PASS_THRESHOLD}). "
                     f"Fix the current implementation before proceeding."
                 )
-        #    ?2: Overall       ?        elif self.overall_score_history and len(self.overall_score_history) >= 2:
+        # Condition 2: Overall score dropped significantly from best
+        elif self.overall_score_history and len(self.overall_score_history) >= 2:
             best_idx = max(range(len(self.overall_score_history)), key=lambda i: self.overall_score_history[i])
             best_overall = self.overall_score_history[best_idx]
             last_overall = self.overall_score_history[-1]
@@ -223,7 +224,7 @@ class Harness:
                 if best_hash:
                     self.git.rollback_to(
                         best_hash,
-                        f"Overall dropped {last_overall:.1f}  ?best was {best_overall:.1f} at round {best_idx + 1}"
+                        f"Overall dropped {last_overall:.1f} — best was {best_overall:.1f} at round {best_idx + 1}"
                     )
                     rollback_msg = (
                         f"\nNOTE: Overall score dropped to {last_overall:.1f}. "
@@ -301,6 +302,10 @@ class Harness:
         code_review_result, code_review_usage, browser_result, browser_usage = self._run_eval_parallel(
             code_reviewer, browser_tester, contract_ref
         )
+        self.log.info(
+            f"[eval] CodeReviewer: {code_review_usage['prompt']}p+{code_review_usage['completion']}c | "
+            f"BrowserTester: {browser_usage['prompt']}p+{browser_usage['completion']}c"
+        )
         self.dashboard.end_agent("success")
         # Step 3: Scoring
         self.log.info("Evaluate phase  ?Step 3: Scoring")
@@ -370,6 +375,14 @@ class Harness:
                        round_prompt, round_completion, elapsed)
         self.dashboard.update_scores(sprint_score, overall_score)
         self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
+        
+        # Round budget summary
+        self.log.info(
+            f"[round_budget] Round {round_num} complete | "
+            f"elapsed: {elapsed:.0f}s | "
+            f"tokens: {round_prompt}p+{round_completion}c | "
+            f"total: {self.token_totals['prompt']}p+{self.token_totals['completion']}c"
+        )
         return score
     def _run_eval_parallel(
         self,
@@ -380,23 +393,42 @@ class Harness:
         """Run CodeReviewer and BrowserTester in parallel via ThreadPoolExecutor.
 
         Returns (code_review_result, code_review_usage, browser_result, browser_usage).
+        Each agent has a 5-minute timeout to prevent runaway evaluation.
         """
         code_task = (
             f"Review the codebase against the acceptance criteria in {contract_ref}.\n"
-            f"Read the contract, then examine all relevant source files in the workspace.\n"
+            f"Read the contract, then examine the MOST IMPORTANT source files only "
+            f"(max 8 files: page.tsx, layout.tsx, key components).\n"
             f"Output a concise report with files examined, critical issues, warnings, "
             f"and feature coverage estimate."
         )
         browser_task = (
             f"Test the web app against the functional criteria in {contract_ref}.\n"
             f"Start the dev server using start_dev_server(), then run browser tests.\n"
-            f"Report PASS/FAIL for each criterion with concrete evidence."
+            f"If browser_test fails due to missing browser, use curl for HTTP verification instead.\n"
+            f"Report PASS/FAIL for each criterion with concrete evidence.\n"
+            f"Limit: 10 iterations max. Do NOT retry server startup multiple times."
         )
+
+        EVAL_TIMEOUT = 300  # 5 minutes per agent
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_cr = executor.submit(code_reviewer.run_with_stats, code_task)
             future_bt = executor.submit(browser_tester.run_with_stats, browser_task)
 
-        code_review_result, code_review_usage = future_cr.result()
-        browser_result, browser_usage = future_bt.result()
+            # Wait for results inside the with block with timeout
+            try:
+                code_review_result, code_review_usage = future_cr.result(timeout=EVAL_TIMEOUT)
+            except FutureTimeoutError:
+                self.log.error("[eval] CodeReviewer timed out after 5 minutes")
+                code_review_result = "[TIMEOUT] Code review exceeded 5 minutes. Assuming no critical issues."
+                code_review_usage = {"prompt": 0, "completion": 0}
+
+            try:
+                browser_result, browser_usage = future_bt.result(timeout=EVAL_TIMEOUT)
+            except FutureTimeoutError:
+                self.log.error("[eval] BrowserTester timed out after 5 minutes")
+                browser_result = "[TIMEOUT] Browser test exceeded 5 minutes. Server may be unresponsive."
+                browser_usage = {"prompt": 0, "completion": 0}
+
         return code_review_result, code_review_usage, browser_result, browser_usage

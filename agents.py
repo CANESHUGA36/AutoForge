@@ -92,13 +92,17 @@ class Agent:
         """
         return _AGENT_EXECUTOR.submit(self.run_with_stats, user_prompt)
 
-    def run_with_stats(self, user_prompt: str) -> tuple[str, dict]:
+    def run_with_stats(self, user_prompt: str, max_iterations: int = None) -> tuple[str, dict]:
         """Run the agent and return (final_text, usage_dict).
 
         增强日志：
         - 每次 iteration 输出 token 累计、耗时
         - 每次 tool call 输出名称、参数摘要、结果状态、耗时
         - Agent 结束时输出结构化 summary
+        
+        Args:
+            user_prompt: The task prompt for the agent.
+            max_iterations: Override the default MAX_ITERATIONS. If None, uses config.MAX_ITERATIONS.
         """
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -111,13 +115,14 @@ class Agent:
         AGENT_TIME_LIMIT_S = 3600
 
         usage: dict[str, int] = {"prompt": 0, "completion": 0}
+        max_iter = max_iterations or config.MAX_ITERATIONS
 
         # 初始化 WorkspaceState（如果启用）
         if self.use_state:
             self._workspace_state = WorkspaceState.load(config.WORKSPACE)
             self._log.info(f"[{self.name}] WorkspaceState loaded: {self._workspace_state.total_files} files")
 
-        for iteration in range(1, config.MAX_ITERATIONS + 1):
+        for iteration in range(1, max_iter + 1):
             elapsed = time.time() - start_time
             if elapsed > AGENT_TIME_LIMIT_S:
                 run_log.final_status = "timeout"
@@ -249,7 +254,7 @@ class Agent:
             run_log.write_jsonl(config.WORKSPACE)
         except Exception:
             pass
-        return "[error] Max iterations reached", usage
+        return f"[error] Max iterations reached ({max_iter}). Stopping to preserve budget.", usage
 
     def _check_context_lifecycle(self, messages: list[dict]) -> list[dict]:
         """检查并管理上下文生命周期（支持 WorkspaceState 分层）。"""
