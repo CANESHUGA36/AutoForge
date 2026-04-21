@@ -10,3 +10,5 @@ services:
       # Host ./projects  <->  Container /projects
       # All generated apps appear in ./projects/ on your Windows machine.
       - ./projects:/projects
+    # Default command - override with: docker compose run autoforge python run.py "your prompt"
+    command: ["python", "run.py"]
