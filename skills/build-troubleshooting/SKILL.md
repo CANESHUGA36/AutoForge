@@ -65,6 +65,25 @@ export default function RootLayout({ children }) {
 
 ## TypeScript Errors
 
+### CRITICAL: Build fails on unused imports or variables (TS6133 / TS6196)
+
+**Cause**: `tsconfig.json` has `noUnusedLocals: true` or `noUnusedParameters: true`.
+
+**Fix**: When creating or editing `tsconfig.json` (or `tsconfig.app.json`), ALWAYS set these to `false`:
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true
+  }
+}
+```
+This prevents build failures from minor refactoring artifacts (unused imports, temporary variables) while keeping real type safety (`strict: true`).
+
+**Rule**: If you see `TS6133` or `TS6196` errors, edit tsconfig to disable these two flags instead of fixing each unused variable individually.
+
 ### FAIL: Cannot find module 'xxx' or its corresponding type declarations
 
 **Fix 1**: Install missing types:

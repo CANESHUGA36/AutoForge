@@ -30,15 +30,25 @@ CRITICAL: You MUST produce actual source files (.html, .css, .js, .tsx, .py, etc
 After writing or editing any source file, the system automatically runs `npm run build`.
 - If you see [BUILD WARNING] with errors, fix them before proceeding.
 - If build fails with a known error pattern, read_skill_file("build-troubleshooting") FIRST.
+- You can also call `validate_build()` explicitly to check build status at any time.
 
 ## Project Initialization (CRITICAL)
-When setting up a new project with `npx create-next-app` or `npm create vite`:
-- ALWAYS use `.` (current directory) as the project name. The workspace IS the project root.
-- Do NOT add output redirection (`>nul`, `> $null`) - the harness handles output internally.
-- Do NOT `cd` into a subfolder after creation.
-- Timeout is auto-extended to 600s for init commands.
+When setting up a new project:
+1. **PREFERRED**: Use `project_init(template="vite-react-ts")` or `project_init(template="nextjs-app")` to instantly copy a pre-cached template.
+2. **FALLBACK** (only if project_init fails): Run `npx create-next-app` or `npm create vite`:
+   - ALWAYS use `.` (current directory) as the project name. The workspace IS the project root.
+   - Do NOT add output redirection (`>nul`, `> $null`).
+   - Do NOT `cd` into a subfolder after creation.
+   - Timeout is auto-extended to 600s for init commands.
 
 After creation, verify with `list_files` that package.json exists in workspace root, then run `npm install` if needed.
+
+**TypeScript Config Rule**: When creating `tsconfig.json` or `tsconfig.app.json`, ALWAYS set:
+```json
+"noUnusedLocals": false,
+"noUnusedParameters": false
+```
+This prevents build failures from minor refactoring artifacts while keeping real type safety.
 
 ## Project Root Rule (CRITICAL)
 The workspace directory IS the project root. NEVER create a subfolder for the project.
@@ -55,7 +65,7 @@ Never leave a single-file HTML project without a working dev script.
 ## Dev Server Runtime Verification (CRITICAL - must pass before commit)
 After `npm run build` succeeds:
 1. Start the server: `npm run dev`
-2. Verify HTTP 200 and page title are correct (use curl or browser_test).
+2. Verify HTTP 200 and page title are correct (use browser_test).
 3. Stop the server before committing.
 
 NEVER commit if the server returns 404, 500, or missing content.
@@ -93,7 +103,13 @@ NEW DIRECTION: One sentence - the fundamentally different approach next round.
 REFINE = issues are fixable within the current architecture.
 PIVOT = same root-cause issue across 2+ rounds, or architecture is fundamentally wrong.
 
-Tools available: read_file, write_file, edit_file, list_files, run_bash, read_skill_file, generate_image, delegate_task.
+Tools available: read_file, write_file, edit_file, list_files, run_bash, read_skill_file, generate_image, delegate_task, validate_build, project_init.
+
+## Iteration Budget (CRITICAL)
+- Each round has a budget of ~30 iterations. Use them wisely.
+- If you have used >25 iterations, STOP adding new features. Commit what you have and declare REFINE.
+- Do NOT burn iterations on perfecting code style, removing unused imports, or minor visual tweaks.
+- Prioritize: working build > core features > polish.
 
 ## Skill Loading Guide
 Load skills proactively based on what you're building:

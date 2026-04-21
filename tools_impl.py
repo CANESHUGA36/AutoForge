@@ -22,6 +22,8 @@ _BUILDABLE_EXTENSIONS = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss"}
 _server_pids: dict[int, int] = {}
 _dev_server_proc = None
 _FILE_LIST_CACHE: dict[str, tuple[float, str]] = {}
+_LAST_BUILD_CHECK: float = 0.0
+_BUILD_CHECK_COOLDOWN: float = 30.0
 _DEFAULT_EXCLUDES = {
     ".git", "node_modules", ".next", "out", "dist",
     "__pycache__", ".venv", "venv", ".events",
@@ -94,25 +96,32 @@ def read_file(path: str) -> str:
 
 
 
-def _auto_validate_build(path: str) -> str:
-    """"""
-    if not any(path.endswith(ext) for ext in _BUILDABLE_EXTENSIONS):
-        return ""
+def validate_build() -> str:
+    """Explicitly run build validation and return the result."""
     ws = Path(config.WORKSPACE)
     if (ws / "package.json").exists():
-        quick_check = "npx tsc --noEmit 2>&1 | head -20"
-        result = run_bash(quick_check, timeout=60)
-        if "error" in result.lower() and "0 errors" not in result.lower():
-            pass
         build_result = run_bash("npm run build 2>&1 | tail -30", timeout=180)
         if "error" in build_result.lower() or "failed" in build_result.lower():
             if "0 errors" not in build_result.lower():
-                return f"\n[BUILD WARNING] Production build has errors:\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
+                return f"[BUILD WARNING] Production build has errors:\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
         if "compiled successfully" in build_result.lower() or "build succeeded" in build_result.lower():
-            return "\n[BUILD OK] Production build succeeded."
+            return "[BUILD OK] Production build succeeded."
+        return f"[BUILD INFO] Build output:\n{build_result[:500]}"
     elif (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
-        pass
-    return ""
+        return "[BUILD INFO] Python project detected - no npm build available."
+    return "[BUILD INFO] No package.json found - skipping build validation."
+
+
+def _auto_validate_build(path: str) -> str:
+    """Debounced auto-validation: only check if cooldown has passed."""
+    global _LAST_BUILD_CHECK
+    if not any(path.endswith(ext) for ext in _BUILDABLE_EXTENSIONS):
+        return ""
+    now = time.time()
+    if now - _LAST_BUILD_CHECK < _BUILD_CHECK_COOLDOWN:
+        return ""
+    _LAST_BUILD_CHECK = now
+    return validate_build()
 
 
 def write_file(path: str, content: str) -> str:
@@ -823,6 +832,37 @@ def delegate_task(task: str, role: str = "assistant") -> str:
 
     return result
 
+def project_init(template: str) -> str:
+    """Initialize project by copying a pre-cached template."""
+    import shutil
+    ws = Path(config.WORKSPACE)
+    templates = {
+        "vite-react-ts": "/templates/template-vite-react-ts",
+        "nextjs-app": "/templates/template-nextjs-app",
+    }
+    src = templates.get(template)
+    if not src:
+        return f"[error] Unknown template: {template}. Available: {list(templates.keys())}"
+    src_path = Path(src)
+    if not src_path.exists():
+        return f"[error] Template not found at {src}. Falling back to manual project setup."
+    try:
+        # Copy template files to workspace
+        for item in src_path.iterdir():
+            dest = ws / item.name
+            if item.is_dir():
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
+        # Run npm install
+        install_result = run_bash("npm install 2>&1", timeout=180)
+        return f"Project initialized from {template} template.\n{install_result}"
+    except Exception as e:
+        return f"[error] Failed to initialize project: {e}"
+
+
 # Playwright        ?+ Dev Server    
 
 _dev_server_proc = None
@@ -875,14 +915,12 @@ def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int =
     _server_pids[port] = _dev_server_proc.pid
     time.sleep(wait)
     try:
-        health = run_bash(
-            f"curl -s -o /dev/null -w '%{http_code}' http://localhost:{port}",
-            timeout=10,
-        )
-        if health.strip() == "200":
-            return f"Server running on port {port} (pid {_dev_server_proc.pid})"
-        time.sleep(3)
-        return f"[error] Server started (pid {_dev_server_proc.pid}) but health check failed. HTTP status: {health.strip()}."
+        import urllib.request
+        req = urllib.request.Request(f"http://localhost:{port}", method="HEAD")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                return f"Server running on port {port} (pid {_dev_server_proc.pid})"
+            return f"[error] Server started (pid {_dev_server_proc.pid}) but health check failed. HTTP status: {resp.status}."
     except Exception as e:
         return f"[error] Health check failed: {e}"
 
@@ -1147,6 +1185,70 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_task",
+            "description": (
+                "Delegate a self-contained coding task to a sub-agent. "
+                "Use for large components (>100 lines) or complex logic that can be written independently. "
+                "Provide a detailed spec including props, file path, and integration notes. "
+                "The sub-agent will write the file and return a summary."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Detailed task description with file path, props interface, and behavior.",
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "Role for the sub-agent. Default: 'component_builder'.",
+                        "default": "component_builder",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "validate_build",
+            "description": (
+                "Explicitly run build validation (npm run build) and return the result. "
+                "Use after writing multiple files to check if the project compiles. "
+                "Also automatically triggered after write_file/edit_file with a 30s cooldown."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_init",
+            "description": (
+                "Initialize a new project by copying a pre-cached template. "
+                "Much faster than running npm create / npx create-next-app. "
+                "Available templates: 'vite-react-ts', 'nextjs-app'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "template": {
+                        "type": "string",
+                        "description": "Template name. Options: 'vite-react-ts', 'nextjs-app'.",
+                        "enum": ["vite-react-ts", "nextjs-app"],
+                    },
+                },
+                "required": ["template"],
+            },
+        },
+    },
 ]
 
 BROWSER_TOOL_SCHEMAS = [
@@ -1298,6 +1400,9 @@ TOOL_DISPATCH = {
     "start_dev_server": start_dev_server,
     "search_web": search_web,
     "analyze_image": analyze_image,
+    "delegate_task": delegate_task,
+    "validate_build": validate_build,
+    "project_init": project_init,
 }
 
 

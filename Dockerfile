@@ -25,6 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Pre-install common dev servers (used by single-file HTML projects) ---
 RUN npm install -g serve http-server
 
+# --- Pre-cache project templates (avoid npm create timeouts in container) ---
+RUN mkdir -p /templates && cd /templates && \
+    npm create vite@latest template-vite-react-ts -- --template react-ts 2>&1 || true && \
+    cd template-vite-react-ts && npm install 2>&1 || true && \
+    cd /templates && \
+    npx create-next-app@latest template-nextjs-app --typescript --tailwind --eslint --app --src-dir --no-turbopack 2>&1 || true && \
+    cd template-nextjs-app && npm install 2>&1 || true && \
+    cd /templates && \
+    echo "Templates cached" && ls -la
+
 # --- Python packages ---
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
