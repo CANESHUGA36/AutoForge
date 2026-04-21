@@ -208,6 +208,8 @@ class Agent:
 
                 tool_start = time.time()
                 result = execute_tool(name, arguments)
+                if result is None:
+                    result = "[error] Tool returned None"
                 tool_latency = time.time() - tool_start
                 tool_latency_ms = round(tool_latency * 1000)
 
