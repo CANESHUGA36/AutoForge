@@ -151,7 +151,7 @@ class Harness:
             self.log.info("\n" + "="*60)
             self.log.info("Phase 2: Contract")
             self.log.info("="*60)
-            negotiate_contract(self.workspace, self.log)
+            negotiate_contract(self.workspace, 0, self.log)
         # Phase 3+: Build-Evaluate loop
         self.dashboard.start_run()
         start_round = self._completed_rounds + 1

@@ -26,5 +26,5 @@ def plan_sprint(workspace: Path, round_num: int, sprint_planner: Agent, logger: 
         logger.info("Sprint contract created")
     else:
         logger.warning("SprintContractWriter did not create sprint_contract.md")
-def negotiate_contract(workspace: Path, logger: logging.Logger) -> None:
+def negotiate_contract(workspace: Path, round_num: int, logger: logging.Logger) -> None:
     """"""
