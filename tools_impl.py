@@ -9,7 +9,6 @@ import signal
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 import requests
 import config
@@ -17,7 +16,6 @@ from skills import get_skill_path
 
 HAS_PLAYWRIGHT = False  # Playwright removed, using MCP instead
 
-_TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tool_")
 _BUILDABLE_EXTENSIONS = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss"}
 _server_pids: dict[int, int] = {}
 _dev_server_proc = None
@@ -889,7 +887,10 @@ def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int =
     time.sleep(1)
     next_cache = ws / ".next"
     if next_cache.exists():
-        run_bash("rm -rf .next", timeout=30)
+        if os.name == "nt":
+            run_bash("rmdir /s /q .next", timeout=30)
+        else:
+            run_bash("rm -rf .next", timeout=30)
     if (ws / "package.json").exists():
         build_result = run_bash("npm run build 2>&1 | tail -20", timeout=180)
         has_error = (

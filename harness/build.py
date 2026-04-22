@@ -89,6 +89,7 @@ def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -
         (success, message)
     """
     import urllib.request
+    import time as _time
 
     port = port or config.DEV_SERVER_PORTS["nextjs"]
     max_wait = max_wait or config.DEV_SERVER_MAX_WAIT
@@ -105,8 +106,7 @@ def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -
 
     # Step 2: Actual HTTP health check with polling
     url = f"http://localhost:{port}"
-    start = time.time()
-    import time as _time
+    start = _time.time()
     while _time.time() - start < max_wait:
         try:
             req = urllib.request.Request(url, method="HEAD")

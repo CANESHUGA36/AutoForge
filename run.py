@@ -21,7 +21,6 @@ def main() -> int:
     
     # Create timestamped workspace under projects/
     projects_dir = Path(os.environ.get("HARNESS_PROJECTS_DIR", "./projects"))
-    timestamp = Path(__file__).stem if False else __import__('datetime').datetime.now().strftime("%Y%m%d-%H%M%S")
     import datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     

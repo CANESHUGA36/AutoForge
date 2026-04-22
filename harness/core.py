@@ -423,12 +423,20 @@ class Harness:
                 self.log.error("[eval] CodeReviewer timed out after 5 minutes")
                 code_review_result = "[TIMEOUT] Code review exceeded 5 minutes. Assuming no critical issues."
                 code_review_usage = {"prompt": 0, "completion": 0}
+            except Exception as e:
+                self.log.error(f"[eval] CodeReviewer crashed: {e}")
+                code_review_result = f"[ERROR] Code review failed: {e}"
+                code_review_usage = {"prompt": 0, "completion": 0}
 
             try:
                 browser_result, browser_usage = future_bt.result(timeout=EVAL_TIMEOUT)
             except FutureTimeoutError:
                 self.log.error("[eval] BrowserTester timed out after 5 minutes")
                 browser_result = "[TIMEOUT] Browser test exceeded 5 minutes. Server may be unresponsive."
+                browser_usage = {"prompt": 0, "completion": 0}
+            except Exception as e:
+                self.log.error(f"[eval] BrowserTester crashed: {e}")
+                browser_result = f"[ERROR] Browser test failed: {e}"
                 browser_usage = {"prompt": 0, "completion": 0}
 
         return code_review_result, code_review_usage, browser_result, browser_usage

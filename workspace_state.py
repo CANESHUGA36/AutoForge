@@ -172,8 +172,9 @@ class WorkspaceState:
         current_paths = set()
         for line in result.splitlines()[:200]:
             line = line.strip()
-            if line:
-                current_paths.add(line)
+            # list_files 输出格式: "F  path/to/file" 或 "D  path/to/dir"
+            if line and len(line) > 3 and line[1:3] == "  ":
+                current_paths.add(line[3:])
         # 检测删除的文件
         for removed in known_paths - current_paths:
             self.files.pop(removed, None)

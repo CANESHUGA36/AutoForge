@@ -139,7 +139,7 @@ class Agent:
             token_count = context.count_tokens(messages)
 
             self._log.info(
-                f"[{self.name}] Iteration {iteration}/{config.MAX_ITERATIONS} | "
+                f"[{self.name}] Iteration {iteration}/{max_iter} | "
                 f"elapsed: {elapsed:.0f}s | "
                 f"tokens: {usage['prompt']}p + {usage['completion']}c | "
                 f"context: {token_count}t"

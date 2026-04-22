@@ -189,7 +189,6 @@ class PlaywrightMCPBridge:
             # 7. 截图
             if screenshot:
                 ss_name = f"_screenshot_{vp['width']}x{vp['height']}.png"
-                ss_path = Path(config.WORKSPACE) / ss_name
                 await self._call_tool("browser_take_screenshot", {"filename": str(ss_name)})
                 report_lines.append(f"Screenshot saved to {ss_name}")
 
