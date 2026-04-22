@@ -19,6 +19,21 @@ import config
 log = logging.getLogger("harness")
 
 
+def _wrap_script(script: str) -> str:
+    """Wrap a raw JS expression into a serializable function for Playwright MCP.
+
+    Playwright MCP's browser_evaluate tool requires the 'function' argument
+    to be a complete, serializable JavaScript function. Many agents pass
+    bare expressions like 'return document.title', which fail with
+    'Passed function is not well-serializable!'.
+    """
+    s = script.strip()
+    if s.startswith("function") or s.startswith("(") or s.startswith("async "):
+        return s
+    # Wrap in an arrow function so it is a valid callable
+    return f"() => {{ {s} }}"
+
+
 class PlaywrightMCPBridge:
     """封装 Playwright MCP 调用，提供与现有 browser_test/browser_evaluate 兼容的接口。"""
 
@@ -155,7 +170,8 @@ class PlaywrightMCPBridge:
                             report_lines.append(f"[error] fill: Element not found: {selector}")
 
                     elif action_type == "evaluate":
-                        result = await self._call_tool("browser_evaluate", {"function": value})
+                        wrapped = _wrap_script(value)
+                        result = await self._call_tool("browser_evaluate", {"function": wrapped})
                         # 提取结果部分
                         eval_text = self._extract_eval_result(result)
                         report_lines.append(f"JS eval: {eval_text[:500]}")
@@ -229,8 +245,9 @@ class PlaywrightMCPBridge:
                 if "Error" in nav_result:
                     return f"[error] Navigation failed: {nav_result}"
 
-            # 执行脚本
-            result = await self._call_tool("browser_evaluate", {"function": script})
+            # 执行脚本 — Playwright MCP 要求 function 是完整可序列化的函数
+            wrapped = _wrap_script(script)
+            result = await self._call_tool("browser_evaluate", {"function": wrapped})
             eval_text = self._extract_eval_result(result)
             return f"Result: {eval_text}"
 

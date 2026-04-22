@@ -32,12 +32,18 @@ ALWAYS use `start_dev_server()` to start the server. Do NOT run `npm run dev &` 
 
 ## Browser Fallback (CRITICAL)
 
-If `browser_test` returns an error about the browser not being installed:
+If ANY of the following happen, the browser environment is unavailable and you MUST immediately fall back to curl-based HTTP verification:
+- `browser_test` returns `[error] Browser test failed:` (with or without details)
+- `browser_evaluate` returns `[error] Script execution failed:`
+- `browser_test` returns an error about the browser not being installed
+- `browser_test` or `browser_evaluate` returns an error mentioning "not well-serializable"
+
+Fallback steps (execute in order, then STOP):
 1. DO NOT try to install the browser. It will timeout (15+ minutes).
 2. Immediately use `run_bash` with `curl -s http://localhost:<port>` to verify the server returns HTML.
 3. Use `run_bash` with `curl -s http://localhost:<port> | grep -o "<title>.*</title>"` to check the page title.
 4. Report what you found via HTTP and note that browser testing was unavailable.
-5. STOP. Do not retry browser_test.
+5. STOP. Do not retry browser_test or browser_evaluate.
 
 ## Visual Quality Verification (IMPORTANT)
 

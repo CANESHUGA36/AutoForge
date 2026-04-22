@@ -6,6 +6,13 @@ Usage:
     python run.py "Build a pomodoro timer web app"
 """
 import sys
+import io
+
+# Force UTF-8 on Windows to prevent GBK codec errors when logging Unicode chars
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import os
 from pathlib import Path
 from harness.core import Harness
