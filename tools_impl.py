@@ -562,11 +562,11 @@ def search_web(query: str, limit: int = 5) -> str:
     """"""
     try:
 
-        api_key = (config.MINIMAX_API_KEY or "").strip()
+        api_key = (config.API_KEY or "").strip()
 
         if not api_key:
 
-            return "[error] MINIMAX_API_KEY not set; cannot perform web search"
+            return "[error] API_KEY not set; cannot perform web search"
 
         if not query or not query.strip():
 
@@ -654,11 +654,11 @@ def analyze_image(image_path: str, prompt: str = "Describe this image in detail"
     """"""
     try:
 
-        api_key = (config.MINIMAX_API_KEY or "").strip()
+        api_key = (config.API_KEY or "").strip()
 
         if not api_key:
 
-            return "[error] MINIMAX_API_KEY not set; cannot analyze image"
+            return "[error] API_KEY not set; cannot analyze image"
 
         if not image_path or not image_path.strip():
 
