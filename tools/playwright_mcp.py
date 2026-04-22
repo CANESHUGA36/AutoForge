@@ -68,10 +68,16 @@ class PlaywrightMCPBridge:
                 await self._session.call_tool("browser_close", {})
             except Exception:
                 pass
-            await self._session.__aexit__(None, None, None)
+            try:
+                await self._session.__aexit__(None, None, None)
+            except Exception:
+                pass
             self._session = None
         if self._client_ctx is not None:
-            await self._client_ctx.__aexit__(None, None, None)
+            try:
+                await self._client_ctx.aclose()
+            except Exception:
+                pass
             self._client_ctx = None
 
     async def _call_tool(self, name: str, arguments: dict) -> str:
@@ -345,16 +351,6 @@ class PlaywrightMCPBridge:
 #  同步包装函数（供现有代码调用）                                         #
 # ---------------------------------------------------------------------- #
 
-_bridge: PlaywrightMCPBridge | None = None
-
-
-def _get_bridge() -> PlaywrightMCPBridge:
-    """获取或创建全局 bridge 实例。"""
-    global _bridge
-    if _bridge is None:
-        _bridge = PlaywrightMCPBridge()
-    return _bridge
-
 
 def browser_test_mcp(
     url: str,
@@ -363,22 +359,21 @@ def browser_test_mcp(
     viewport: dict | None = None,
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_test。
-    
-    复用全局 _bridge 实例以避免每次调用都重新启动 MCP server。
+
+    每次调用创建独立的 bridge 实例，并在同一个事件循环中完成和关闭，
+    避免跨 asyncio.run() 复用 session 导致 async generator 状态污染。
     """
-    bridge = _get_bridge()
+    async def _run() -> str:
+        bridge = PlaywrightMCPBridge()
+        try:
+            return await bridge.browser_test(url, actions, screenshot, viewport)
+        finally:
+            await bridge.close()
+
     try:
-        result = asyncio.run(bridge.browser_test(url, actions, screenshot, viewport))
-        return result
+        return asyncio.run(_run())
     except Exception as e:
         log.warning(f"[playwright_mcp] browser_test failed: {e}")
-        # On failure, close and reset bridge so next call starts fresh
-        try:
-            asyncio.run(bridge.close())
-        except Exception:
-            pass
-        global _bridge
-        _bridge = None
         return f"[error] Browser test failed: {e}"
 
 
@@ -388,31 +383,26 @@ def browser_evaluate_mcp(
     viewport: dict | None = None,
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_evaluate。
-    
-    复用全局 _bridge 实例以避免每次调用都重新启动 MCP server。
+
+    每次调用创建独立的 bridge 实例，避免跨事件循环复用。
     """
-    bridge = _get_bridge()
+    async def _run() -> str:
+        bridge = PlaywrightMCPBridge()
+        try:
+            return await bridge.browser_evaluate(script, url, viewport)
+        finally:
+            await bridge.close()
+
     try:
-        result = asyncio.run(bridge.browser_evaluate(script, url, viewport))
-        return result
+        return asyncio.run(_run())
     except Exception as e:
         log.warning(f"[playwright_mcp] browser_evaluate failed: {e}")
-        # On failure, close and reset bridge so next call starts fresh
-        try:
-            asyncio.run(bridge.close())
-        except Exception:
-            pass
-        global _bridge
-        _bridge = None
         return f"[error] browser_evaluate failed: {e}"
 
 
 def close_mcp_bridge() -> None:
-    """关闭 MCP bridge（清理资源）。"""
-    global _bridge
-    if _bridge is not None:
-        try:
-            asyncio.run(_bridge.close())
-        except Exception as e:
-            log.debug(f"[playwright_mcp] close failed: {e}")
-        _bridge = None
+    """关闭 MCP bridge（兼容性保留，现为无操作）。
+
+    Bridge 已在每个同步包装函数的内部 finally 块中关闭。
+    """
+    pass

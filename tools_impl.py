@@ -94,14 +94,36 @@ def read_file(path: str) -> str:
 
 
 
+def _update_workspace_build_status(status: str, error_msg: str = "") -> None:
+    """Update WorkspaceState build status after explicit validation."""
+    try:
+        from workspace_state import WorkspaceState
+        state = WorkspaceState.load(config.WORKSPACE)
+        state.last_build_status = status
+        if status == "ok":
+            state.last_build_errors = []
+        elif error_msg:
+            state.last_build_errors.append(error_msg)
+        state.save(config.WORKSPACE)
+    except Exception:
+        pass
+
+
 def validate_build() -> str:
     """Explicitly run build validation and return the result."""
     ws = Path(config.WORKSPACE)
     if (ws / "package.json").exists():
         build_result = run_bash("npm run build 2>&1 | tail -30", timeout=180)
-        if "error" in build_result.lower() or "failed" in build_result.lower():
-            if "0 errors" not in build_result.lower():
-                return f"[BUILD WARNING] Production build has errors:\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
+        has_real_error = (
+            "error" in build_result.lower()
+            and "0 errors" not in build_result.lower()
+            and "compiled successfully" not in build_result.lower()
+            and "build succeeded" not in build_result.lower()
+        )
+        if has_real_error:
+            _update_workspace_build_status("error", build_result[:300])
+            return f"[BUILD WARNING] Production build has errors:\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
+        _update_workspace_build_status("ok")
         if "compiled successfully" in build_result.lower() or "build succeeded" in build_result.lower():
             return "[BUILD OK] Production build succeeded."
         return f"[BUILD INFO] Build output:\n{build_result[:500]}"

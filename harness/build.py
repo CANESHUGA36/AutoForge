@@ -79,6 +79,22 @@ def build_build_task(
     return task
 
 
+def _detect_project_port(workspace: Path) -> int:
+    """Detect dev server port from package.json dependencies."""
+    package_json = workspace / "package.json"
+    if package_json.exists():
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+            deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+            if "vite" in deps:
+                return config.DEV_SERVER_PORTS["vite"]
+            if "next" in deps:
+                return config.DEV_SERVER_PORTS["nextjs"]
+        except Exception:
+            pass
+    return config.DEV_SERVER_PORTS["nextjs"]
+
+
 def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -> tuple[bool, str]:
     """Harness-level dev server verification.
 
@@ -91,7 +107,7 @@ def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -
     import urllib.request
     import time as _time
 
-    port = port or config.DEV_SERVER_PORTS["nextjs"]
+    port = port or _detect_project_port(workspace)
     max_wait = max_wait or config.DEV_SERVER_MAX_WAIT
 
     # Step 1: Check workspace state for known build errors

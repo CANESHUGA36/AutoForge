@@ -342,7 +342,7 @@ class Harness:
                 self.log.info(f"  [{status}] {dim}: {s}/10 (threshold {threshold})")
         else:
             self.log.warning("Could not parse per-dimension scores from evaluator feedback")
-        #        ?        score = overall_score
+        score = overall_score
         failed_dims = check_dimension_thresholds(dim_scores)
         if failed_dims:
             self.log.warning(f"Hard threshold(s) failed: {', '.join(failed_dims)}")
