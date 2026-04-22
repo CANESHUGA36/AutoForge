@@ -128,12 +128,13 @@ class DashboardState:
 class Dashboard:
     """Dashboard 管理器"""
     
-    def __init__(self, workspace: str):
+    def __init__(self, workspace: str, logger: logging.Logger | None = None):
         self.workspace = Path(workspace)
         self.state = DashboardState(workspace=workspace)
         self._round_start_time: float = 0.0
         self._total_start_time: float = 0.0
         self._agent_start_time: float = 0.0
+        self._logger = logger or log
         
     def start_run(self) -> None:
         """标记总运行开始"""
@@ -224,7 +225,7 @@ class Dashboard:
         
         # 输出到日志（每轮或关键事件时）
         if self.state.phase in ("done", "failed") or self.state.agent_status in ("error", "timeout"):
-            log.info(f"[dashboard]\n{self.state.to_console()}")
+            self._logger.info(f"[dashboard]\n{self.state.to_console()}")
     
     def snapshot(self) -> DashboardState:
         """获取当前状态快照"""

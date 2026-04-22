@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -42,11 +43,23 @@ class PlaywrightMCPBridge:
             ],
         )
         self._client_ctx = stdio_client(params)
-        self._read, self._write = await self._client_ctx.__aenter__()
-        self._session = ClientSession(self._read, self._write)
-        await self._session.__aenter__()
-        await self._session.initialize()
-        return self._session
+        try:
+            self._read, self._write = await self._client_ctx.__aenter__()
+            self._session = ClientSession(self._read, self._write)
+            try:
+                await self._session.__aenter__()
+                await self._session.initialize()
+                return self._session
+            except Exception:
+                # Session enter failed; clean up client context
+                await self._client_ctx.__aexit__(*sys.exc_info())
+                self._client_ctx = None
+                self._session = None
+                raise
+        except Exception:
+            # Client context enter failed; nothing to clean up yet
+            self._client_ctx = None
+            raise
 
     async def close(self) -> None:
         """关闭 MCP session 和浏览器。"""
@@ -277,12 +290,55 @@ class PlaywrightMCPBridge:
     def _find_ref_by_selector(self, snapshot: str, selector: str) -> str | None:
         """在 accessibility snapshot 中通过 selector 查找元素的 ref。
 
-        这是一个简化实现：尝试通过文本内容或属性匹配。
-        更精确的匹配需要解析完整的 accessibility tree。
+        解析 MCP browser_snapshot 返回的 markdown 格式，提取 ref 值。
+        Snapshot 格式示例:
+            - heading "Title" [ref=s1e2]
+            - button "Click me" [ref=s1e3]
+            - link "About" [ref=s1e4]
         """
-        # 简单启发式：如果 selector 是 CSS 选择器，尝试从 snapshot 中找匹配文本
-        # 实际使用中，MCP 的 snapshot 使用 ref 系统，这里做简化处理
-        # TODO: 实现更精确的 selector -> ref 映射
+        import re
+
+        if not selector or not snapshot:
+            return None
+
+        # 提取 selector 中的关键文本（去除 CSS 前缀）
+        search_text = selector.strip()
+        # 去除常见的 CSS 前缀: #id, .class, [attr], tagname
+        for prefix in ("#", ".", "[", "]"):
+            search_text = search_text.replace(prefix, " ")
+        search_text = search_text.strip().lower()
+
+        if not search_text:
+            return None
+
+        # 解析 snapshot 中的每一行，查找 ref 和文本
+        # 格式: - tag "text" [ref=xxx] 或 [ref=xxx] text
+        ref_pattern = re.compile(r'\[ref=([^\]]+)\]')
+
+        candidates = []
+        for line in snapshot.splitlines():
+            line_lower = line.lower()
+            ref_match = ref_pattern.search(line)
+            if not ref_match:
+                continue
+
+            ref = ref_match.group(1)
+            # 移除 ref 部分，保留其余文本用于匹配
+            text_without_ref = ref_pattern.sub('', line).lower()
+
+            # 匹配策略：精确匹配 > 包含匹配 > 部分词匹配
+            if search_text in text_without_ref:
+                # 计算匹配质量：越短的行匹配越精确
+                quality = len(text_without_ref) - len(search_text)
+                candidates.append((quality, ref, line.strip()))
+
+        if candidates:
+            # 选择最精确的匹配（质量值最小）
+            candidates.sort(key=lambda x: x[0])
+            _, best_ref, matched_line = candidates[0]
+            log.debug(f"[playwright_mcp] Selector '{selector}' matched ref={best_ref} in line: {matched_line[:100]}")
+            return best_ref
+
         return None
 
 

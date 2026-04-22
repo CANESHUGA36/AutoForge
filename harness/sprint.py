@@ -10,12 +10,24 @@ from prompts import SPRINT_PLANNER_SYSTEM, SPRINT_CONTRACT_BUILDER_SYSTEM
 from tools_impl import TOOL_SCHEMAS
 log = logging.getLogger("harness")
 def plan_sprint(workspace: Path, round_num: int, sprint_planner: Agent, logger: logging.Logger) -> None:
-    """"""
+    """Generate sprint.md (if missing) and derive sprint_contract.md from it."""
     logger.info("Sprint contract generation phase")
     sprint_path = workspace / config.SPRINT_FILE
+    
+    # Create sprint.md if it doesn't exist using the SprintPlanner agent
     if not sprint_path.exists():
-        logger.warning("sprint.md not found  ?skipping per-sprint contract")
-        return
+        logger.info("sprint.md not found — invoking SprintPlanner to create it")
+        sprint_planner.run(
+            f"Round {round_num}: Read {config.SPEC_FILE} and {config.CONTRACT_FILE}, "
+            f"then create the sprint plan and save it to {config.SPRINT_FILE}. "
+            f"This is a fresh project — create the first sprint."
+        )
+        if not sprint_path.exists():
+            logger.warning("SprintPlanner did not create sprint.md — skipping per-sprint contract")
+            return
+        logger.info("sprint.md created by SprintPlanner")
+    
+    # Create sprint_contract.md from sprint.md using a dedicated contract writer
     writer = Agent("SprintContractWriter", SPRINT_CONTRACT_BUILDER_SYSTEM, TOOL_SCHEMAS, logger=logger)
     writer.run(
         f"Round {round_num}: Read {config.SPRINT_FILE} and {config.CONTRACT_FILE}, "

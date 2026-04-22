@@ -9,7 +9,7 @@ import logging
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 import config
 from agents import Agent
@@ -55,7 +55,7 @@ class Harness:
         self.sprint_planner = Agent("SprintPlanner", SPRINT_PLANNER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
         self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS, use_state=True, logger=self.log)
         self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, use_state=True, logger=self.log)
-        #    ?        self.score_history: list[float] = []
+        self.score_history: list[float] = []
         self.sprint_score_history: list[float] = []
         self.overall_score_history: list[float] = []
         self.commit_history: list[tuple[int, str]] = []
@@ -65,7 +65,7 @@ class Harness:
         self._completed_rounds: int = 0
         self._resumed: bool = False
         self.eval_cache = EvalCache(str(self.workspace))
-        self.dashboard = Dashboard(str(self.workspace))
+        self.dashboard = Dashboard(str(self.workspace), logger=self.log)
         self._load_state()
     # ------------------------------------------------------------------ #
     #              ?StateManager ?                                  #

@@ -815,13 +815,10 @@ def delegate_task(task: str, role: str = "assistant") -> str:
         )
 
     sub = Agent(
-
         name=f"sub_{role}",
-
         system_prompt=system_prompt,
-
-        tools=TOOL_SCHEMAS
-
+        tools=TOOL_SCHEMAS,
+        logger=log,
     )
 
     result = sub.run(task)
@@ -886,6 +883,7 @@ def _kill_dev_server() -> None:
     _kill_port(5173)
 
 def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int = 10) -> str:
+    global _dev_server_proc
     ws = Path(config.WORKSPACE)
     _kill_port(port)
     time.sleep(1)

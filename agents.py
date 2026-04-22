@@ -37,6 +37,7 @@ class AgentRunLog:
     total_completion_tokens: int = 0
     final_status: str = "running"
     error: str | None = None
+    _logger: logging.Logger | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -55,8 +56,8 @@ class AgentRunLog:
 
     def emit(self) -> None:
         """输出结构化日志行。"""
-        # 使用模块级 log，因为 AgentRunLog 没有绑定到特定 Agent 实例
-        log.info(f"[agent_summary] {json.dumps(self.to_dict(), ensure_ascii=False)}")
+        target_log = self._logger if self._logger is not None else log
+        target_log.info(f"[agent_summary] {json.dumps(self.to_dict(), ensure_ascii=False)}")
 
     def write_jsonl(self, workspace: str) -> None:
         """追加写入 workspace 的 events 目录，供外部监控。"""
@@ -109,7 +110,7 @@ class Agent:
             {"role": "user", "content": user_prompt}
         ]
 
-        run_log = AgentRunLog(agent_name=self.name)
+        run_log = AgentRunLog(agent_name=self.name, _logger=self._log)
         self._log.info(f"[{self.name}] Agent starting | prompt_len={len(user_prompt)} | state_mode={self.use_state}")
         start_time = time.time()
         AGENT_TIME_LIMIT_S = 3600
