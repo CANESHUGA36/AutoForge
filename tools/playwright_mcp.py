@@ -26,12 +26,48 @@ def _wrap_script(script: str) -> str:
     to be a complete, serializable JavaScript function. Many agents pass
     bare expressions like 'return document.title', which fail with
     'Passed function is not well-serializable!'.
+
+    Rules:
+    - Complete function declarations / arrow functions are passed through.
+    - Scripts containing 'await' are wrapped in an async arrow function.
+    - Scripts starting with 'return' keep the return statement.
+    - Multi-line scripts are wrapped in braces.
+    - Simple expressions get an automatic 'return'.
     """
     s = script.strip()
-    if s.startswith("function") or s.startswith("(") or s.startswith("async "):
+
+    # Already a complete function declaration → pass through
+    if s.startswith("function ") or s.startswith("async function "):
         return s
-    # Wrap in an arrow function so it is a valid callable
-    return f"() => {{ {s} }}"
+
+    # Already a parenthesized arrow function expression → pass through
+    # Covers: () => ..., (x) => ..., (x, y) => ...
+    if s.startswith("("):
+        return s
+
+    # Already an async arrow function or async expression → pass through
+    if s.startswith("async "):
+        return s
+
+    # Detect if script uses await (needs async wrapper)
+    needs_async = "await " in s
+
+    # Script starts with 'return' → wrap as-is (keep the return statement)
+    if s.startswith("return "):
+        if needs_async:
+            return f"async () => {{ {s} }}"
+        return f"() => {{ {s} }}"
+
+    # Multi-line or complex script → wrap in braces without adding return
+    if "\n" in s:
+        if needs_async:
+            return f"async () => {{ {s} }}"
+        return f"() => {{ {s} }}"
+
+    # Simple expression → wrap with implicit return
+    if needs_async:
+        return f"async () => {{ return {s}; }}"
+    return f"() => {{ return {s}; }}"
 
 
 class PlaywrightMCPBridge:
@@ -77,7 +113,7 @@ class PlaywrightMCPBridge:
             raise
 
     async def close(self) -> None:
-        """关闭 MCP session 和浏览器。"""
+        """关闭 MCP session 和浏览器进程。"""
         if self._session is not None:
             try:
                 await self._session.call_tool("browser_close", {})
@@ -88,9 +124,12 @@ class PlaywrightMCPBridge:
             except Exception:
                 pass
             self._session = None
+
         if self._client_ctx is not None:
             try:
-                await self._client_ctx.aclose()
+                # Use __aexit__ (symmetric with __aenter__) instead of aclose()
+                # to avoid anyio CancelScope race during asyncio.run() shutdown.
+                await self._client_ctx.__aexit__(None, None, None)
             except Exception:
                 pass
             self._client_ctx = None
