@@ -113,9 +113,20 @@ def validate_build() -> str:
     """Explicitly run build validation and return the result."""
     ws = Path(config.WORKSPACE)
     if (ws / "package.json").exists():
-        build_result = run_bash("npm run build 2>&1 | tail -30", timeout=180)
+        # FIX BUG #4: Use exit code as primary signal, heuristic as fallback
+        build_result = run_bash("npm run build 2>&1 | tail -40", timeout=180)
+        # run_bash returns [exit code: N] on non-zero exit
+        exit_code_match = __import__('re').search(r'\[exit code:\s*(\d+)\]', build_result)
+        exit_code = int(exit_code_match.group(1)) if exit_code_match else None
+        
+        if exit_code is not None and exit_code != 0:
+            _update_workspace_build_status("error", build_result[:300])
+            return f"[BUILD WARNING] Production build failed (exit code {exit_code}):\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
+        
+        # Fallback heuristic when exit code not captured
         has_real_error = (
-            "error" in build_result.lower()
+            exit_code is None
+            and "error" in build_result.lower()
             and "0 errors" not in build_result.lower()
             and "compiled successfully" not in build_result.lower()
             and "build succeeded" not in build_result.lower()
@@ -1049,7 +1060,9 @@ def browser_test(
             viewport=viewport,
         )
     except Exception as e:
-        _kill_dev_server()
+        # FIX BUG #5: Only kill the dev server we started, not all global servers
+        if start_command:
+            _kill_port(port)
         return f"[error] Browser test failed: {e}"
 
 def browser_evaluate(

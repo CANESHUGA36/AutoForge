@@ -123,6 +123,7 @@ def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -
     # Step 2: Actual HTTP health check with polling
     url = f"http://localhost:{port}"
     start = _time.time()
+    last_error = ""
     while _time.time() - start < max_wait:
         try:
             req = urllib.request.Request(url, method="HEAD")
@@ -134,9 +135,13 @@ def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -
         except urllib.error.HTTPError as e:
             if e.code >= 500:
                 return False, f"Dev server error on port {port} (HTTP {e.code})"
-            # 404 or other client errors might mean server is starting
-        except Exception:
-            pass
+            # 404 means server is up but route not found — still counts as responding
+            if e.code == 404:
+                return True, f"Dev server responding on port {port} (HTTP 404 — server is up)"
+            # Other client errors might mean server is starting
+            last_error = f"HTTP {e.code}"
+        except Exception as e:
+            last_error = str(e)
         _time.sleep(1)
 
-    return False, f"Dev server not responding on port {port} after {max_wait}s"
+    return False, f"Dev server not responding on port {port} after {max_wait}s (last: {last_error})"

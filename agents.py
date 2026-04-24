@@ -294,10 +294,16 @@ class Agent:
 
     def _llm_call_simple(self, messages: list[dict]) -> str:
         """简单的 LLM 调用（用于摘要）"""
-        response = client.chat.completions.create(
-            model=config.MODEL,
-            messages=messages,
-            temperature=0.3,
-            extra_body={"reasoning": {"type": "disabled"}},
-        )
-        return response.choices[0].message.content or ""
+        # FIX BUG #6: Add exception handling for API failures
+        try:
+            response = client.chat.completions.create(
+                model=config.MODEL,
+                messages=messages,
+                temperature=0.3,
+                extra_body={"reasoning": {"type": "disabled"}},
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            self._log.warning(f"[{self.name}] _llm_call_simple failed: {e}")
+            # Return a minimal fallback summary so context compression doesn't crash
+            return "[Summary unavailable due to API error]"

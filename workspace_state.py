@@ -262,7 +262,18 @@ class WorkspaceState:
             state.current_sprint_goal = data.get("current_sprint_goal", "")
             state.completed_tasks = data.get("completed_tasks", [])
             state.open_issues = data.get("open_issues", [])
-            # score_history removed — scores are tracked in harness_state.json only
+            # FIX BUG #3: Restore files dict from serialized data
+            files_data = data.get("files", {})
+            for path_str, fdata in files_data.items():
+                state.files[path_str] = FileState(
+                    path=fdata.get("path", path_str),
+                    size=fdata.get("size", 0),
+                    lines=fdata.get("lines", 0),
+                    summary=fdata.get("summary", ""),
+                )
+            # Recompute totals from restored files
+            state.total_files = len(state.files)
+            state.total_lines = sum(f.lines for f in state.files.values())
             return state
         except Exception as e:
             log.warning(f"[state] Failed to load workspace state: {e}")

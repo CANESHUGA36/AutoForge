@@ -160,8 +160,12 @@ class Harness:
         # Phase 2+: Build-Evaluate loop
         self.dashboard.start_run()
         start_round = self._completed_rounds + 1
-        max_rounds = self._calculate_max_rounds()
-        for round_num in range(start_round, max_rounds + 1):
+        for round_num in range(start_round, getattr(config, 'MAX_ROUNDS_HARD', 10) + 1):
+            # FIX BUG #9: Recalculate max_rounds each round so runtime adjustments apply
+            max_rounds = self._calculate_max_rounds()
+            if round_num > max_rounds:
+                self.log.info(f"Stopping at round {round_num-1} (dynamic max_rounds={max_rounds})")
+                break
             self.log.info("\n" + "="*60)
             self.log.info(f"Round {round_num}/{max_rounds}")
             self.log.info("="*60)
@@ -237,8 +241,10 @@ class Harness:
                         f"Rolled back to round {best_idx + 1} (best overall {best_overall:.1f}). "
                         f"The last approach broke existing functionality. Fix or change strategy."
                     )
-        # Sprint    
-        plan_sprint_master(self.workspace, round_num, self.sprint_master, self.log)
+        # Sprint
+        sprint_ok = plan_sprint_master(self.workspace, round_num, self.sprint_master, self.log)
+        if not sprint_ok:
+            self.log.warning(f"[sprint] Round {round_num} using fallback sprint.md")
         # Build
         self.log.info("Build phase")
         self.dashboard.start_agent("Builder")
@@ -259,40 +265,50 @@ class Harness:
         if not server_ok:
             self.log.warning(f"[build_gate] Dev server verification failed: {server_msg}")
             self.dashboard.add_alert(f"Round {round_num}: Dev server failed - {server_msg}")
-        # Git    
-        self.git.commit_round(round_num)
-        #              
+        # FIX BUG #1: Build Gate BEFORE commit — prevent bad code from being committed
         ws_state_path = self.workspace / ".workspace_state.json"
+        build_failed = False
         if ws_state_path.exists():
             try:
                 ws_data = json.loads(ws_state_path.read_text(encoding="utf-8"))
                 if ws_data.get("last_build_status") == "error":
-                    self.log.warning("[build_gate] Build failed  ?skipping evaluation and forcing retry")
-                    self.dashboard.add_alert(f"Build failed in round {round_num}, skipping eval")
-                    score = config.SPRINT_PASS_THRESHOLD - 0.5
-                    self.sprint_score_history.append(score)
-                    self.overall_score_history.append(score)
-                    self.score_history.append(score)
-                    round_prompt = build_usage["prompt"]
-                    round_completion = build_usage["completion"]
-                    self.token_totals["prompt"] += round_prompt
-                    self.token_totals["completion"] += round_completion
-                    elapsed = time.time() - round_start
-                    self.round_stats.append({
-                        "round": round_num,
-                        "score": score,
-                        "strategy": strategy["strategy"],
-                        "prompt_tokens": round_prompt,
-                        "completion_tokens": round_completion,
-                        "elapsed_s": elapsed,
-                    })
-                    log_round_stats(self.log, round_num, score, score, score,
-                                   round_prompt, round_completion, elapsed)
-                    self.dashboard.update_scores(score, score)
-                    self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
-                    return score
+                    build_failed = True
             except Exception as e:
                 self.log.debug(f"[build_gate] Could not check build status: {e}")
+        
+        if build_failed:
+            self.log.warning("[build_gate] Build failed — skipping commit and evaluation, forcing retry")
+            self.dashboard.add_alert(f"Build failed in round {round_num}, skipping eval")
+            # Rollback any uncommitted changes to keep workspace clean
+            self.git.rollback_to(
+                self.git.get_head_hash(),
+                f"Build failed in round {round_num} — rolling back uncommitted changes"
+            )
+            score = config.SPRINT_PASS_THRESHOLD - 0.5
+            self.sprint_score_history.append(score)
+            self.overall_score_history.append(score)
+            self.score_history.append(score)
+            round_prompt = build_usage["prompt"]
+            round_completion = build_usage["completion"]
+            self.token_totals["prompt"] += round_prompt
+            self.token_totals["completion"] += round_completion
+            elapsed = time.time() - round_start
+            self.round_stats.append({
+                "round": round_num,
+                "score": score,
+                "strategy": strategy["strategy"],
+                "prompt_tokens": round_prompt,
+                "completion_tokens": round_completion,
+                "elapsed_s": elapsed,
+            })
+            log_round_stats(self.log, round_num, score, score, score,
+                           round_prompt, round_completion, elapsed)
+            self.dashboard.update_scores(score, score)
+            self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
+            return score
+        
+        # Git commit only after build gate passes
+        self.git.commit_round(round_num)
         # Evaluate
         contract_ref = config.CONTRACT_FILE
         # Step 1: Reviewer（统一审查报告）
@@ -312,10 +328,16 @@ class Harness:
         # Step 2: Judge（评分）
         self.log.info("Evaluate phase  ?Step 2: Judge (scoring)")
         self.dashboard.start_agent("Judge")
+        # FIX: Judge reads Reviewer report from EvalCache (not hardcoded path)
+        review_report = self.eval_cache.get_full_report(round_num) or ""
+        review_hint = ""
+        if review_report:
+            review_hint = f"\n\nReviewer report for this round:\n{review_report[:4000]}\n\n"
         judge_task = (
             f"Round {round_num} evaluation.\n\n"
-            f"Read the Reviewer report, {config.SPRINT_FILE}, {config.CONTRACT_FILE}, "
+            f"Read {config.SPRINT_FILE}, {config.CONTRACT_FILE}, "
             f"and any previous {config.FEEDBACK_FILE}, then produce feedback.md with scores."
+            f"{review_hint}"
         )
         judge_result, judge_usage = self.judge.run_with_stats(judge_task)
         self.dashboard.end_agent("success")
@@ -352,6 +374,8 @@ class Harness:
                     f"forces continuation. Effective score capped to {config.PASS_THRESHOLD - 0.1}."
                 )
                 score = config.PASS_THRESHOLD - 0.1
+                # FIX BUG #2: Sync overall_score so downstream logic sees the capped value
+                overall_score = score
         round_prompt = build_usage["prompt"] + review_usage["prompt"] + judge_usage["prompt"]
         round_completion = build_usage["completion"] + review_usage["completion"] + judge_usage["completion"]
         self.token_totals["prompt"] += round_prompt
@@ -377,12 +401,12 @@ class Harness:
             f"tokens: {round_prompt}p+{round_completion}c | "
             f"total: {self.token_totals['prompt']}p+{self.token_totals['completion']}c"
         )
-        # 每轮结束后释放 Reviewer 的浏览器实例
+        # FIX BUG #7: Release ALL browser instances to prevent resource leak
         try:
             from tools.playwright_mcp import close_mcp_bridge
-            close_mcp_bridge("reviewer")
+            close_mcp_bridge(None)  # None = close all contexts
         except Exception as e:
-            self.log.debug(f"[playwright] Could not release reviewer bridge: {e}")
+            self.log.debug(f"[playwright] Could not release bridge: {e}")
         return score
 
     def _build_build_task(self, round_num: int, rollback_msg: str) -> str:
@@ -474,8 +498,19 @@ class Harness:
 
         text = sprint_path.read_text(encoding="utf-8", errors="replace")
         import re
-        match = re.search(r'- 保守：(\d+) 次', text)
-        conservative = int(match.group(1)) if match else 25
+        # FIX BUG #11: Support multiple formats (Chinese, English, colon variants)
+        patterns = [
+            r'[保守|Conservative|conservative][：:]\s*(\d+)\s*[次|iterations|]',
+            r'(\d+)\s*[次|iterations]\s*\(?[保守|conservative]\)?',
+            r'预算[:：]\s*(\d+)',
+            r'budget[:：]\s*(\d+)',
+        ]
+        conservative = 25
+        for pat in patterns:
+            match = re.search(pat, text)
+            if match:
+                conservative = int(match.group(1))
+                break
 
         threshold = int(conservative * 0.8)
         budget_msg = f"""

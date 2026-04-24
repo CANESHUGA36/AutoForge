@@ -449,7 +449,7 @@ def browser_test_mcp(
     actions: list | None = None,
     screenshot: bool = True,
     viewport: dict | None = None,
-    context_id: str = "default",
+    context_id: str = "reviewer",  # FIX BUG #7: match _build_round cleanup context_id
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_test。
 
@@ -459,6 +459,17 @@ def browser_test_mcp(
         bridge = await _pool.get(context_id)
         return await bridge.browser_test(url, actions, screenshot, viewport)
 
+    # FIX BUG #8: Avoid asyncio.run() nesting — use existing loop or fallback
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        # Already inside an event loop — schedule and get result via concurrent.futures
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, _run())
+            return future.result()
     try:
         return asyncio.run(_run())
     except Exception as e:
@@ -470,7 +481,7 @@ def browser_evaluate_mcp(
     script: str,
     url: str | None = None,
     viewport: dict | None = None,
-    context_id: str = "default",
+    context_id: str = "reviewer",  # FIX BUG #7: match _build_round cleanup context_id
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_evaluate。
 
@@ -480,6 +491,16 @@ def browser_evaluate_mcp(
         bridge = await _pool.get(context_id)
         return await bridge.browser_evaluate(script, url, viewport)
 
+    # FIX BUG #8: Avoid asyncio.run() nesting
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, _run())
+            return future.result()
     try:
         return asyncio.run(_run())
     except Exception as e:
@@ -499,6 +520,16 @@ def close_mcp_bridge(context_id: str | None = None) -> None:
         else:
             await _pool.close_all()
 
+    # FIX BUG #8: Avoid asyncio.run() nesting
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, _run())
+            return future.result()
     try:
         asyncio.run(_run())
     except Exception as e:
