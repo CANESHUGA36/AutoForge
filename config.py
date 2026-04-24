@@ -37,7 +37,9 @@ COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", "80000"))
 RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "150000"))
 
 # Harness 循环
-MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "5"))
+MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "0"))  # 0 = 动态计算
+MIN_ROUNDS = 3
+MAX_ROUNDS_HARD = 10
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
 # 双轨评分 —— Sprint 过程门槛 + Overall 交付门槛
@@ -56,6 +58,7 @@ DIMENSION_THRESHOLDS: dict = {
 
 # Agent 限制
 MAX_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "80"))
+UNIT_TEST_COVERAGE_THRESHOLD = float(os.environ.get("UNIT_TEST_THRESHOLD", "0.0"))
 MAX_TOOL_ERRORS = 5
 
 # 路径
@@ -69,7 +72,7 @@ PROJECTS_DIR = os.path.abspath(os.environ.get("HARNESS_PROJECTS_DIR", "./project
 SPEC_FILE = "spec.md"
 FEEDBACK_FILE = "feedback.md"
 CONTRACT_FILE = "contract.md"
-SPRINT_CONTRACT_FILE = "sprint_contract.md"
+
 PROGRESS_FILE = "progress.md"
 SPRINT_FILE = "sprint.md"
 STATE_FILE = "harness_state.json"

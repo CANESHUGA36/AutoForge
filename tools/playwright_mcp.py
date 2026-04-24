@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -17,6 +18,37 @@ from mcp.client.stdio import stdio_client
 import config
 
 log = logging.getLogger("harness")
+
+
+class PlaywrightMCPPool:
+    """跨调用复用 Playwright + Browser 实例，按 context_id 隔离"""
+
+    def __init__(self):
+        self._bridges: dict[str, PlaywrightMCPBridge] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, context_id: str = "default") -> PlaywrightMCPBridge:
+        async with self._lock:
+            if context_id not in self._bridges:
+                bridge = PlaywrightMCPBridge()
+                await bridge.start()
+                self._bridges[context_id] = bridge
+            return self._bridges[context_id]
+
+    async def release(self, context_id: str):
+        async with self._lock:
+            if context_id in self._bridges:
+                await self._bridges[context_id].close()
+                del self._bridges[context_id]
+
+    async def close_all(self):
+        for bridge in self._bridges.values():
+            await bridge.close()
+        self._bridges.clear()
+
+
+# 全局单例
+_pool = PlaywrightMCPPool()
 
 
 def _wrap_script(script: str) -> str:
@@ -78,6 +110,10 @@ class PlaywrightMCPBridge:
         self._client_ctx = None
         self._read = None
         self._write = None
+
+    async def start(self):
+        """显式启动 bridge（Pool 管理时使用）"""
+        await self._ensure_session()
 
     async def _ensure_session(self) -> ClientSession:
         """确保 MCP session 已建立。"""
@@ -413,18 +449,15 @@ def browser_test_mcp(
     actions: list | None = None,
     screenshot: bool = True,
     viewport: dict | None = None,
+    context_id: str = "default",
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_test。
 
-    每次调用创建独立的 bridge 实例，并在同一个事件循环中完成和关闭，
-    避免跨 asyncio.run() 复用 session 导致 async generator 状态污染。
+    通过 PlaywrightMCPPool 复用 bridge 实例，避免重复启动浏览器。
     """
     async def _run() -> str:
-        bridge = PlaywrightMCPBridge()
-        try:
-            return await bridge.browser_test(url, actions, screenshot, viewport)
-        finally:
-            await bridge.close()
+        bridge = await _pool.get(context_id)
+        return await bridge.browser_test(url, actions, screenshot, viewport)
 
     try:
         return asyncio.run(_run())
@@ -437,17 +470,15 @@ def browser_evaluate_mcp(
     script: str,
     url: str | None = None,
     viewport: dict | None = None,
+    context_id: str = "default",
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_evaluate。
 
-    每次调用创建独立的 bridge 实例，避免跨事件循环复用。
+    通过 PlaywrightMCPPool 复用 bridge 实例。
     """
     async def _run() -> str:
-        bridge = PlaywrightMCPBridge()
-        try:
-            return await bridge.browser_evaluate(script, url, viewport)
-        finally:
-            await bridge.close()
+        bridge = await _pool.get(context_id)
+        return await bridge.browser_evaluate(script, url, viewport)
 
     try:
         return asyncio.run(_run())
@@ -456,9 +487,19 @@ def browser_evaluate_mcp(
         return f"[error] browser_evaluate failed: {e}"
 
 
-def close_mcp_bridge() -> None:
-    """关闭 MCP bridge（兼容性保留，现为无操作）。
+def close_mcp_bridge(context_id: str | None = None) -> None:
+    """关闭 MCP bridge。
 
-    Bridge 已在每个同步包装函数的内部 finally 块中关闭。
+    如果提供了 context_id，只释放该 context 的 bridge；
+    否则关闭所有 bridge。
     """
-    pass
+    async def _run():
+        if context_id is not None:
+            await _pool.release(context_id)
+        else:
+            await _pool.close_all()
+
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        log.warning(f"[playwright_mcp] close_mcp_bridge failed: {e}")

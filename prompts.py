@@ -19,17 +19,18 @@ def load_prompt(name: str) -> str:
     return _CACHE[name]
 
 
-# 向后兼容：所有原有常量仍可直接导入
-PLANNER_SYSTEM = load_prompt("planner")
+# 新 5-Agent 架构
+ARCHITECT_SYSTEM = load_prompt("architect")
+SPRINT_MASTER_SYSTEM = load_prompt("sprint_master")
 BUILDER_SYSTEM = load_prompt("builder")
-EVALUATOR_SYSTEM = load_prompt("evaluator")
-SPRINT_PLANNER_SYSTEM = load_prompt("sprint_planner")
-SPRINT_CONTRACT_BUILDER_SYSTEM = load_prompt("sprint_contract_builder")
-CONTRACT_BUILDER_SYSTEM = load_prompt("contract_builder")
-CODE_REVIEWER_SYSTEM = load_prompt("code_reviewer")
-BROWSER_TESTER_SYSTEM = load_prompt("browser_tester")
-COMPONENT_BUILDER_SYSTEM = load_prompt("component_builder")
+REVIEWER_SYSTEM = load_prompt("reviewer")
+JUDGE_SYSTEM = load_prompt("judge")
 
-# 已删除（未在 harness 中使用）：
-# CONTRACT_REVIEWER_SYSTEM
-# SPRINT_CONTRACT_REVIEWER_SYSTEM
+# 保留的子代理 prompt
+COMPONENT_BUILDER_SYSTEM = load_prompt("component_builder")
+UNIT_TESTER_SYSTEM = load_prompt("unit_tester")
+
+# 已删除的旧 prompt（不再使用）：
+# PLANNER_SYSTEM, CONTRACT_BUILDER_SYSTEM, SPRINT_PLANNER_SYSTEM,
+# SPRINT_CONTRACT_BUILDER_SYSTEM, CODE_REVIEWER_SYSTEM,
+# BROWSER_TESTER_SYSTEM, EVALUATOR_SYSTEM

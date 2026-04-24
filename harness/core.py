@@ -16,18 +16,14 @@ from agents import Agent
 from dashboard import Dashboard
 from eval_cache import EvalCache
 from prompts import (
-    PLANNER_SYSTEM, BUILDER_SYSTEM, EVALUATOR_SYSTEM,
-    CONTRACT_BUILDER_SYSTEM,
-    SPRINT_PLANNER_SYSTEM,
-    SPRINT_CONTRACT_BUILDER_SYSTEM,
-    CODE_REVIEWER_SYSTEM, BROWSER_TESTER_SYSTEM,
+    ARCHITECT_SYSTEM, BUILDER_SYSTEM, REVIEWER_SYSTEM, JUDGE_SYSTEM, SPRINT_MASTER_SYSTEM,
 )
 from tools_impl import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
 from harness.build import build_build_task, verify_dev_server
 from harness.eval import parse_scores, parse_dimension_scores, check_dimension_thresholds
 from harness.git import GitManager
 from harness.logging import setup_file_logging, log_round_stats, log_final_stats
-from harness.sprint import plan_sprint, negotiate_contract
+from harness.sprint import plan_sprint_master
 from harness.state import StateManager
 from harness.strategy import parse_strategy
 logging.basicConfig(
@@ -50,11 +46,25 @@ class Harness:
         self.state_mgr = StateManager(self.workspace)
         self.git.init_repo()
         setup_file_logging(self.workspace, self.log)
-        #     Agent
-        self.planner = Agent("Planner", PLANNER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
-        self.sprint_planner = Agent("SprintPlanner", SPRINT_PLANNER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
-        self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS, use_state=True, logger=self.log)
-        self.evaluator = Agent("Evaluator", EVALUATOR_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, use_state=True, logger=self.log)
+        #     Agent（按职能细分工具集）
+        CORE_TOOLS = {"read_file", "write_file", "read_skill_file"}
+        FILE_TOOLS = {"edit_file", "list_files"}
+        EXEC_TOOLS = {"run_bash", "start_dev_server"}
+        BROWSER_TOOLS = {"browser_test", "browser_evaluate"}
+        GEN_TOOLS = {"generate_image", "search_web", "analyze_image"}
+        META_TOOLS = {"validate_build", "project_init", "delegate_task"}
+
+        architect_tools = CORE_TOOLS | GEN_TOOLS | {"search_web"}
+        sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
+        builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS
+        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"start_dev_server"}
+        judge_tools = CORE_TOOLS | {"read_file", "write_file", "read_skill_file"}
+
+        self.architect = Agent("Architect", ARCHITECT_SYSTEM, TOOL_SCHEMAS, allowed_tools=architect_tools, logger=self.log)
+        self.sprint_master = Agent("SprintMaster", SPRINT_MASTER_SYSTEM, TOOL_SCHEMAS, allowed_tools=sprint_master_tools, logger=self.log)
+        self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS, use_state=True, allowed_tools=builder_tools, logger=self.log)
+        self.reviewer = Agent("Reviewer", REVIEWER_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, allowed_tools=reviewer_tools, logger=self.log)
+        self.judge = Agent("Judge", JUDGE_SYSTEM, TOOL_SCHEMAS, allowed_tools=judge_tools, logger=self.log)
         self.score_history: list[float] = []
         self.sprint_score_history: list[float] = []
         self.overall_score_history: list[float] = []
@@ -113,7 +123,7 @@ class Harness:
     #      ?                                                           #
     # ------------------------------------------------------------------ #
     def run(self, user_prompt: str) -> dict:
-        """Run the full Planner  ?Contract  ?Build-Evaluate loop."""
+        """Run the full Architect -> Build-Evaluate loop."""
         self.log.info("="*60)
         self.log.info("Harness %s", "resuming" if self._resumed else "starting")
         self.log.info("="*60)
@@ -129,35 +139,31 @@ class Harness:
             )
         spec_path = self.workspace / config.SPEC_FILE
         contract_path = self.workspace / config.CONTRACT_FILE
-        # Phase 1: Plan
-        if spec_path.exists():
-            self.log.info("Phase 1: Plan  ?SKIPPED (spec.md already exists)")
+        # Phase 1: Design (Architect) — spec.md + contract.md 一次性产出
+        if spec_path.exists() and contract_path.exists():
+            self.log.info("Phase 1: Design  ?SKIPPED (spec.md and contract.md already exist)")
         else:
             self.log.info("\n" + "="*60)
-            self.log.info("Phase 1: Plan")
+            self.log.info("Phase 1: Design")
             self.log.info("="*60)
-            self.planner.run(
-                f"Create a product specification for:\n\n{user_prompt}\n\n"
-                f"Save to {config.SPEC_FILE}"
+            self.architect.run(
+                f"Create a product specification and acceptance criteria for:\n\n{user_prompt}\n\n"
+                f"First save the spec to {config.SPEC_FILE}, then save the contract to {config.CONTRACT_FILE}."
             )
             if not spec_path.exists():
-                self.log.error("Planner failed to create spec.md")
-                return {"success": False, "error": "Planner failed to create spec", "rounds": 0, "score": 0}
-            self.log.info("Spec created successfully")
-        # Phase 2: Contract
-        if contract_path.exists():
-            self.log.info("Phase 2: Contract  ?SKIPPED (contract.md already exists)")
-        else:
-            self.log.info("\n" + "="*60)
-            self.log.info("Phase 2: Contract")
-            self.log.info("="*60)
-            negotiate_contract(self.workspace, 0, self.log)
-        # Phase 3+: Build-Evaluate loop
+                self.log.error("Architect failed to create spec.md")
+                return {"success": False, "error": "Architect failed to create spec", "rounds": 0, "score": 0}
+            if not contract_path.exists():
+                self.log.error("Architect failed to create contract.md")
+                return {"success": False, "error": "Architect failed to create contract", "rounds": 0, "score": 0}
+            self.log.info("Spec and contract created successfully")
+        # Phase 2+: Build-Evaluate loop
         self.dashboard.start_run()
         start_round = self._completed_rounds + 1
-        for round_num in range(start_round, config.MAX_ROUNDS + 1):
+        max_rounds = self._calculate_max_rounds()
+        for round_num in range(start_round, max_rounds + 1):
             self.log.info("\n" + "="*60)
-            self.log.info(f"Round {round_num}/{config.MAX_ROUNDS}")
+            self.log.info(f"Round {round_num}/{max_rounds}")
             self.log.info("="*60)
             self.dashboard.start_round(round_num)
             score = self._build_round(round_num)
@@ -174,7 +180,7 @@ class Harness:
                     "token_totals": dict(self.token_totals),
                     "round_stats": list(self.round_stats),
                 }
-            if round_num < config.MAX_ROUNDS:
+            if round_num < max_rounds:
                 self.log.info(f"Overall score {score:.1f} below threshold {config.PASS_THRESHOLD}, continuing...")
         log_final_stats(self.log, self.round_stats, self.sprint_score_history,
                        self.overall_score_history, self.token_totals)
@@ -232,15 +238,11 @@ class Harness:
                         f"The last approach broke existing functionality. Fix or change strategy."
                     )
         # Sprint    
-        plan_sprint(self.workspace, round_num, self.sprint_planner, self.log)
-        negotiate_contract(self.workspace, round_num, self.log)
+        plan_sprint_master(self.workspace, round_num, self.sprint_master, self.log)
         # Build
         self.log.info("Build phase")
         self.dashboard.start_agent("Builder")
-        build_task = build_build_task(
-            self.workspace, round_num, rollback_msg,
-            self.overall_score_history, self.strategy_history
-        )
+        build_task = self._build_build_task(round_num, rollback_msg)
         build_result, build_usage = self.builder.run_with_stats(build_task)
         self.dashboard.end_agent("success")
         #       
@@ -292,32 +294,30 @@ class Harness:
             except Exception as e:
                 self.log.debug(f"[build_gate] Could not check build status: {e}")
         # Evaluate
-        sprint_contract_path = self.workspace / config.SPRINT_CONTRACT_FILE
-        contract_ref = config.SPRINT_CONTRACT_FILE if sprint_contract_path.exists() else config.CONTRACT_FILE
-        # Step 1 & 2: Code Review + Browser Test (parallel)
-        self.log.info("Evaluate phase  ?Step 1 & 2: Code Review + Browser Test (parallel)")
-        self.dashboard.start_agent("CodeReviewer+BrowserTester")
-        code_reviewer = Agent("CodeReviewer", CODE_REVIEWER_SYSTEM, TOOL_SCHEMAS, logger=self.log)
-        browser_tester = Agent("BrowserTester", BROWSER_TESTER_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, logger=self.log)
-        code_review_result, code_review_usage, browser_result, browser_usage = self._run_eval_parallel(
-            code_reviewer, browser_tester, contract_ref
+        contract_ref = config.CONTRACT_FILE
+        # Step 1: Reviewer（统一审查报告）
+        self.log.info("Evaluate phase  ?Step 1: Reviewer (unified review)")
+        self.dashboard.start_agent("Reviewer")
+        review_task = (
+            f"Review the codebase and test the web app for round {round_num}.\n"
+            f"Read the acceptance criteria in {contract_ref}, then:\n"
+            f"1. Examine the MOST IMPORTANT source files (max 8 files).\n"
+            f"2. Start the dev server and run browser tests (desktop + mobile).\n"
+            f"3. Produce a unified review report.\n"
+            f"Limit: 10 iterations max."
         )
-        self.log.info(
-            f"[eval] CodeReviewer: {code_review_usage['prompt']}p+{code_review_usage['completion']}c | "
-            f"BrowserTester: {browser_usage['prompt']}p+{browser_usage['completion']}c"
-        )
+        review_result, review_usage = self.reviewer.run_with_stats(review_task)
+        self.eval_cache.save_round(round_num, review_result)
         self.dashboard.end_agent("success")
-        # Step 3: Scoring
-        self.log.info("Evaluate phase  ?Step 3: Scoring")
-        self.dashboard.start_agent("Evaluator")
-        eval_task = self.eval_cache.build_evaluator_prompt(
-            round_num=round_num,
-            code_review_result=code_review_result,
-            browser_result=browser_result,
-            contract_ref=contract_ref,
-            previous_rounds=2,
+        # Step 2: Judge（评分）
+        self.log.info("Evaluate phase  ?Step 2: Judge (scoring)")
+        self.dashboard.start_agent("Judge")
+        judge_task = (
+            f"Round {round_num} evaluation.\n\n"
+            f"Read the Reviewer report, {config.SPRINT_FILE}, {config.CONTRACT_FILE}, "
+            f"and any previous {config.FEEDBACK_FILE}, then produce feedback.md with scores."
         )
-        eval_result, eval_usage = self.evaluator.run_with_stats(eval_task)
+        judge_result, judge_usage = self.judge.run_with_stats(judge_task)
         self.dashboard.end_agent("success")
         #     feedback.md
         feedback_path = self.workspace / config.FEEDBACK_FILE
@@ -325,9 +325,9 @@ class Harness:
             try:
                 eval_text = feedback_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
-                eval_text = eval_result
+                eval_text = judge_result
         else:
-            eval_text = eval_result
+            eval_text = judge_result
         sprint_score, overall_score = parse_scores(eval_text)
         self.sprint_score_history.append(sprint_score)
         self.overall_score_history.append(overall_score)
@@ -341,7 +341,7 @@ class Harness:
                 status = "OK" if s >= threshold else "FAIL"
                 self.log.info(f"  [{status}] {dim}: {s}/10 (threshold {threshold})")
         else:
-            self.log.warning("Could not parse per-dimension scores from evaluator feedback")
+            self.log.warning("Could not parse per-dimension scores from judge feedback")
         score = overall_score
         failed_dims = check_dimension_thresholds(dim_scores)
         if failed_dims:
@@ -352,14 +352,8 @@ class Harness:
                     f"forces continuation. Effective score capped to {config.PASS_THRESHOLD - 0.1}."
                 )
                 score = config.PASS_THRESHOLD - 0.1
-        round_prompt = (
-            build_usage["prompt"] + code_review_usage["prompt"] +
-            browser_usage["prompt"] + eval_usage["prompt"]
-        )
-        round_completion = (
-            build_usage["completion"] + code_review_usage["completion"] +
-            browser_usage["completion"] + eval_usage["completion"]
-        )
+        round_prompt = build_usage["prompt"] + review_usage["prompt"] + judge_usage["prompt"]
+        round_completion = build_usage["completion"] + review_usage["completion"] + judge_usage["completion"]
         self.token_totals["prompt"] += round_prompt
         self.token_totals["completion"] += round_completion
         elapsed = time.time() - round_start
@@ -383,60 +377,185 @@ class Harness:
             f"tokens: {round_prompt}p+{round_completion}c | "
             f"total: {self.token_totals['prompt']}p+{self.token_totals['completion']}c"
         )
+        # 每轮结束后释放 Reviewer 的浏览器实例
+        try:
+            from tools.playwright_mcp import close_mcp_bridge
+            close_mcp_bridge("reviewer")
+        except Exception as e:
+            self.log.debug(f"[playwright] Could not release reviewer bridge: {e}")
         return score
-    def _run_eval_parallel(
-        self,
-        code_reviewer: Agent,
-        browser_tester: Agent,
-        contract_ref: str,
-    ) -> tuple[str, dict, str, dict]:
-        """Run CodeReviewer and BrowserTester in parallel via ThreadPoolExecutor.
 
-        Returns (code_review_result, code_review_usage, browser_result, browser_usage).
-        Each agent has a 5-minute timeout to prevent runaway evaluation.
-        """
-        code_task = (
-            f"Review the codebase against the acceptance criteria in {contract_ref}.\n"
-            f"Read the contract, then examine the MOST IMPORTANT source files only "
-            f"(max 8 files: page.tsx, layout.tsx, key components).\n"
-            f"Output a concise report with files examined, critical issues, warnings, "
-            f"and feature coverage estimate."
+    def _build_build_task(self, round_num: int, rollback_msg: str) -> str:
+        """Build the task prompt for the Builder agent."""
+        sprint_path = self.workspace / config.SPRINT_FILE
+        contract_path = self.workspace / config.CONTRACT_FILE
+        feedback_path = self.workspace / config.FEEDBACK_FILE
+
+        # Primary guide: sprint.md (自带验收标准)
+        if sprint_path.exists():
+            primary_guide = f"1. Read {config.SPRINT_FILE} — this is your ONLY task list and acceptance criteria for this round.\n"
+        else:
+            primary_guide = f"1. Read {config.SPEC_FILE} for product spec.\n"
+
+        # Global contract as fallback
+        if contract_path.exists():
+            primary_guide += f"2. Read {config.CONTRACT_FILE} for global acceptance criteria.\n"
+
+        task = f"Round {round_num} of building.{rollback_msg}\n\nSteps:\n{primary_guide}"
+
+        if feedback_path.exists() and round_num > 1:
+            task += f"3. Read {config.FEEDBACK_FILE} for previous feedback and address relevant issues.\n"
+
+            if len(self.overall_score_history) >= 2:
+                delta = self.overall_score_history[-1] - self.overall_score_history[-2]
+                if delta > 0:
+                    task += f"\nTrend: Improving (+{delta:.1f}), continue refining."
+                elif delta < 0:
+                    task += f"\nTrend: Declining ({delta:.1f}), consider pivoting."
+                else:
+                    task += f"\nTrend: Flat, try a different approach."
+
+        # Inject the previous round's strategy decision
+        if self.strategy_history:
+            prev = self.strategy_history[-1]
+            if prev["strategy"] == "PIVOT":
+                task += (
+                    f"\n\nPREVIOUS ROUND STRATEGY: PIVOT"
+                    f"\nReason: {prev['reason']}"
+                )
+                if prev.get("new_direction"):
+                    task += (
+                        f"\nNew direction declared: {prev['new_direction']}"
+                        f"\n\nACTION REQUIRED: You declared a PIVOT. You MUST start from scratch with "
+                        f"a fundamentally different approach as described above. Do NOT continue patching "
+                        f"the previous implementation — delete or replace the core files and rebuild."
+                    )
+            else:
+                task += (
+                    f"\n\nPREVIOUS ROUND STRATEGY: REFINE"
+                    f"\nReason: {prev['reason']}"
+                    f"\nContinue improving the existing implementation."
+                )
+
+        # 动态注入迭代预算
+        task = self._inject_iteration_budget(task)
+
+        task += "\n\nCommit with git when done."
+        return task
+
+    def _build_trend_summary(self) -> str:
+        """将完整历史分数压缩为趋势摘要"""
+        if not self.overall_score_history:
+            return "No scores yet."
+        recent = self.overall_score_history[-5:]
+        trend = " -> ".join(f"{s:.1f}" for s in recent)
+        best_idx = max(range(len(self.overall_score_history)), key=lambda i: self.overall_score_history[i])
+        best_round = best_idx + 1
+        best_score = self.overall_score_history[best_idx]
+        last_strategy = self.strategy_history[-1]["strategy"] if self.strategy_history else "UNKNOWN"
+        consecutive_refine = 0
+        for s in reversed(self.strategy_history):
+            if s["strategy"] == "REFINE":
+                consecutive_refine += 1
+            else:
+                break
+        return (
+            f"Score Trend: {trend}\n"
+            f"Best Round: Round {best_round} ({best_score:.1f})\n"
+            f"Last Strategy: {last_strategy}\n"
+            f"Consecutive REFINEs: {consecutive_refine}"
         )
-        browser_task = (
-            f"Test the web app against the functional criteria in {contract_ref}.\n"
-            f"Start the dev server using start_dev_server(), then run browser tests.\n"
-            f"If browser_test fails due to missing browser, use curl for HTTP verification instead.\n"
-            f"Report PASS/FAIL for each criterion with concrete evidence.\n"
-            f"Limit: 10 iterations max. Do NOT retry server startup multiple times."
-        )
 
-        EVAL_TIMEOUT = 300  # 5 minutes per agent
+    def _inject_iteration_budget(self, build_task: str) -> str:
+        """从 sprint.md 解析预估迭代数，动态注入预算提示。"""
+        sprint_path = self.workspace / config.SPRINT_FILE
+        if not sprint_path.exists():
+            return build_task
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_cr = executor.submit(code_reviewer.run_with_stats, code_task)
-            future_bt = executor.submit(browser_tester.run_with_stats, browser_task)
+        text = sprint_path.read_text(encoding="utf-8", errors="replace")
+        import re
+        match = re.search(r'- 保守：(\d+) 次', text)
+        conservative = int(match.group(1)) if match else 25
 
-            # Wait for results inside the with block with timeout
-            try:
-                code_review_result, code_review_usage = future_cr.result(timeout=EVAL_TIMEOUT)
-            except FutureTimeoutError:
-                self.log.error("[eval] CodeReviewer timed out after 5 minutes")
-                code_review_result = "[TIMEOUT] Code review exceeded 5 minutes. Assuming no critical issues."
-                code_review_usage = {"prompt": 0, "completion": 0}
-            except Exception as e:
-                self.log.error(f"[eval] CodeReviewer crashed: {e}")
-                code_review_result = f"[ERROR] Code review failed: {e}"
-                code_review_usage = {"prompt": 0, "completion": 0}
+        threshold = int(conservative * 0.8)
+        budget_msg = f"""
+## Iteration Budget
+本轮保守预算：{conservative} 次迭代。
+如果已使用 >{threshold} 次，停止添加新功能，优先保证验收标准中优先级最高的 2 条。
+"""
+        return build_task + budget_msg
 
-            try:
-                browser_result, browser_usage = future_bt.result(timeout=EVAL_TIMEOUT)
-            except FutureTimeoutError:
-                self.log.error("[eval] BrowserTester timed out after 5 minutes")
-                browser_result = "[TIMEOUT] Browser test exceeded 5 minutes. Server may be unresponsive."
-                browser_usage = {"prompt": 0, "completion": 0}
-            except Exception as e:
-                self.log.error(f"[eval] BrowserTester crashed: {e}")
-                browser_result = f"[ERROR] Browser test failed: {e}"
-                browser_usage = {"prompt": 0, "completion": 0}
+    # ------------------------------------------------------------------ #
+    #      Dynamic Round Limits                                         #
+    # ------------------------------------------------------------------ #
+    def _calculate_max_rounds(self) -> int:
+        """基于项目复杂度、历史表现、Builder 策略动态调整轮数上限"""
+        base = self._estimate_from_spec()
+        runtime_adjust = self._runtime_adjustment()
+        strategy_adjust = self._strategy_adjustment()
 
-        return code_review_result, code_review_usage, browser_result, browser_usage
+        max_rounds = min(base + runtime_adjust + strategy_adjust, getattr(config, 'MAX_ROUNDS_HARD', 10))
+        max_rounds = max(max_rounds, getattr(config, 'MIN_ROUNDS', 3))
+
+        self.log.info(f"[dynamic_rounds] base={base}, runtime={runtime_adjust}, "
+                      f"strategy={strategy_adjust} -> max_rounds={max_rounds}")
+        return max_rounds
+
+    def _estimate_from_spec(self) -> int:
+        """从 spec.md 解析功能点，估算基础轮数"""
+        spec_path = self.workspace / config.SPEC_FILE
+        if not spec_path.exists():
+            return 5
+
+        spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
+        feature_lines = [l for l in spec_text.splitlines()
+                         if l.strip().startswith("-") and "feature" in l.lower()]
+        feature_count = len(feature_lines)
+        asset_count = spec_text.count("generate_image")
+
+        rounds = 2  # 骨架 + 验收
+        rounds += feature_count // 3
+        rounds += asset_count // 2
+        return min(rounds, 8)
+
+    def _runtime_adjustment(self) -> int:
+        """基于已跑轮次表现，追加或缩减"""
+        if not self.sprint_score_history:
+            return 0
+
+        # 信号 A：连续高分但 Overall 没过 -> 功能多，需要更多轮
+        recent = self.sprint_score_history[-2:]
+        if len(recent) == 2 and all(s >= 8.0 for s in recent):
+            if not self.overall_score_history or self.overall_score_history[-1] < config.PASS_THRESHOLD:
+                return 2
+
+        # 信号 B：连续停滞（Overall 几乎不变）-> 缩减，逼迫 PIVOT
+        if len(self.overall_score_history) >= 3:
+            last_three = self.overall_score_history[-3:]
+            if max(last_three) - min(last_three) < 0.5:
+                return -1
+
+        # 信号 C：Overall 持续上升且已接近门槛 -> 追加 1 轮冲刺
+        if self.overall_score_history and self.overall_score_history[-1] >= 6.5:
+            return 1
+
+        return 0
+
+    def _strategy_adjustment(self) -> int:
+        """Builder 策略信号"""
+        if not self.strategy_history:
+            return 0
+
+        recent_strategies = [s["strategy"] for s in self.strategy_history[-2:]]
+
+        # 连续 PIVOT：架构在重构，给额外轮次
+        if recent_strategies == ["PIVOT", "PIVOT"]:
+            return 2
+
+        # 连续 REFINE 且分数上升：势头好，给 1 轮奖励
+        if recent_strategies == ["REFINE", "REFINE"]:
+            if len(self.overall_score_history) >= 2 and \
+               self.overall_score_history[-1] > self.overall_score_history[-2]:
+                return 1
+
+        return 0

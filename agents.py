@@ -71,11 +71,13 @@ class AgentRunLog:
 class Agent:
     """支持上下文管理的 Agent"""
 
-    def __init__(self, name: str, system_prompt: str, tools: list, use_state: bool = False, logger=None):
+    def __init__(self, name: str, system_prompt: str, tools: list, use_state: bool = False, logger=None, allowed_tools: set[str] | None = None):
         self.name = name
         catalog = skills.build_catalog_prompt()
         self.system_prompt = system_prompt + (f"\n{catalog}" if catalog else "")
         self.tools = tools
+        if allowed_tools is not None:
+            self.tools = [t for t in tools if t["function"]["name"] in allowed_tools]
         self.use_state = use_state
         self._workspace_state: WorkspaceState | None = None
         self._log = logger or log
