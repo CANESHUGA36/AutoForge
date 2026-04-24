@@ -110,17 +110,7 @@ def verify_dev_server(workspace: Path, port: int = None, max_wait: int = None) -
     port = port or _detect_project_port(workspace)
     max_wait = max_wait or config.DEV_SERVER_MAX_WAIT
 
-    # Step 1: Check workspace state for known build errors
-    ws_state_path = workspace / ".workspace_state.json"
-    if ws_state_path.exists():
-        try:
-            ws_data = json.loads(ws_state_path.read_text(encoding="utf-8"))
-            if ws_data.get("last_build_status") == "error":
-                return False, "Build status is error (from workspace state)"
-        except Exception:
-            pass
-
-    # Step 2: Actual HTTP health check with polling
+    # Step 1: Actual HTTP health check with polling
     url = f"http://localhost:{port}"
     start = _time.time()
     last_error = ""

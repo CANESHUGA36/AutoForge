@@ -151,10 +151,8 @@ class PlaywrightMCPBridge:
     async def close(self) -> None:
         """关闭 MCP session 和浏览器进程。"""
         if self._session is not None:
-            try:
-                await self._session.call_tool("browser_close", {})
-            except Exception:
-                pass
+            # FIX: Remove browser_close tool call — session.__aexit__ handles cleanup.
+            # Calling browser_close may kill the MCP Server process prematurely.
             try:
                 await self._session.__aexit__(None, None, None)
             except Exception:
@@ -456,8 +454,15 @@ def browser_test_mcp(
     通过 PlaywrightMCPPool 复用 bridge 实例，避免重复启动浏览器。
     """
     async def _run() -> str:
-        bridge = await _pool.get(context_id)
-        return await bridge.browser_test(url, actions, screenshot, viewport)
+        try:
+            bridge = await _pool.get(context_id)
+            return await bridge.browser_test(url, actions, screenshot, viewport)
+        except Exception as e:
+            # Bridge may be corrupted — recreate and retry once
+            log.warning(f"[playwright_mcp] First attempt failed ({e}), recreating bridge...")
+            await _pool.release(context_id)
+            bridge = await _pool.get(context_id)
+            return await bridge.browser_test(url, actions, screenshot, viewport)
 
     # FIX BUG #8: Avoid asyncio.run() nesting — use existing loop or fallback
     try:
@@ -465,10 +470,11 @@ def browser_test_mcp(
     except RuntimeError:
         loop = None
     if loop is not None:
-        # Already inside an event loop — schedule and get result via concurrent.futures
+        # Already inside an event loop — run in a fresh thread with its own event loop
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, _run())
+            # Pass a callable, not a coroutine object, so the child thread creates its own loop
+            future = executor.submit(lambda: asyncio.run(_run()))
             return future.result()
     try:
         return asyncio.run(_run())
@@ -488,8 +494,15 @@ def browser_evaluate_mcp(
     通过 PlaywrightMCPPool 复用 bridge 实例。
     """
     async def _run() -> str:
-        bridge = await _pool.get(context_id)
-        return await bridge.browser_evaluate(script, url, viewport)
+        try:
+            bridge = await _pool.get(context_id)
+            return await bridge.browser_evaluate(script, url, viewport)
+        except Exception as e:
+            # Bridge may be corrupted — recreate and retry once
+            log.warning(f"[playwright_mcp] First attempt failed ({e}), recreating bridge...")
+            await _pool.release(context_id)
+            bridge = await _pool.get(context_id)
+            return await bridge.browser_evaluate(script, url, viewport)
 
     # FIX BUG #8: Avoid asyncio.run() nesting
     try:
@@ -499,7 +512,7 @@ def browser_evaluate_mcp(
     if loop is not None:
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, _run())
+            future = executor.submit(lambda: asyncio.run(_run()))
             return future.result()
     try:
         return asyncio.run(_run())
@@ -528,7 +541,7 @@ def close_mcp_bridge(context_id: str | None = None) -> None:
     if loop is not None:
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, _run())
+            future = executor.submit(lambda: asyncio.run(_run()))
             return future.result()
     try:
         asyncio.run(_run())

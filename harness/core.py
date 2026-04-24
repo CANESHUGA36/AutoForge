@@ -245,6 +245,18 @@ class Harness:
         sprint_ok = plan_sprint_master(self.workspace, round_num, self.sprint_master, self.log)
         if not sprint_ok:
             self.log.warning(f"[sprint] Round {round_num} using fallback sprint.md")
+        # FIX: Clear stale build status from previous round before Builder starts
+        ws_state_path = self.workspace / ".workspace_state.json"
+        if ws_state_path.exists():
+            try:
+                ws_data = json.loads(ws_state_path.read_text(encoding="utf-8"))
+                if ws_data.get("last_build_status") == "error":
+                    self.log.info("[build_gate] Clearing stale error status from previous round")
+                    ws_data["last_build_status"] = "unknown"
+                    ws_state_path.write_text(json.dumps(ws_data), encoding="utf-8")
+            except Exception:
+                pass
+        
         # Build
         self.log.info("Build phase")
         self.dashboard.start_agent("Builder")
@@ -309,6 +321,22 @@ class Harness:
         
         # Git commit only after build gate passes
         self.git.commit_round(round_num)
+        
+        # Screenshot Gate: quick visual verification before Reviewer
+        try:
+            from tools.playwright_mcp import browser_test_mcp
+            ss_result = browser_test_mcp(
+                url="http://localhost:5173",
+                actions=[{"type": "wait", "delay": 2000}],
+                screenshot=True,
+            )
+            if "[error]" in ss_result:
+                self.log.warning(f"[screenshot_gate] Page render issue: {ss_result[:200]}")
+            else:
+                self.log.info("[screenshot_gate] Page renders correctly")
+        except Exception as e:
+            self.log.debug(f"[screenshot_gate] Skipped: {e}")
+        
         # Evaluate
         contract_ref = config.CONTRACT_FILE
         # Step 1: Reviewer（统一审查报告）

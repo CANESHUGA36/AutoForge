@@ -109,6 +109,23 @@ def _update_workspace_build_status(status: str, error_msg: str = "") -> None:
         pass
 
 
+def _validate_css_classes(expected_classes: list[str] | None = None) -> str:
+    """验证生成的 CSS 是否包含预期的自定义类名。"""
+    ws = Path(config.WORKSPACE)
+    css_files = list(ws.glob("dist/assets/*.css"))
+    if not css_files:
+        return ""
+    try:
+        css_content = css_files[0].read_text(encoding="utf-8")
+        expected = expected_classes or ["bg-background", "text-primary", "border-primary"]
+        missing = [c for c in expected if f".{c}" not in css_content and f"{c}:" not in css_content]
+        if missing:
+            return f"\n[CSS ERROR] Missing classes: {', '.join(missing)}. Check Tailwind/CSS config."
+        return f"\n[CSS OK] All {len(expected)} expected classes found."
+    except Exception:
+        return ""
+
+
 def validate_build() -> str:
     """Explicitly run build validation and return the result."""
     ws = Path(config.WORKSPACE)
@@ -135,9 +152,10 @@ def validate_build() -> str:
             _update_workspace_build_status("error", build_result[:300])
             return f"[BUILD WARNING] Production build has errors:\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
         _update_workspace_build_status("ok")
+        css_check = _validate_css_classes()
         if "compiled successfully" in build_result.lower() or "build succeeded" in build_result.lower():
-            return "[BUILD OK] Production build succeeded."
-        return f"[BUILD INFO] Build output:\n{build_result[:500]}"
+            return f"[BUILD OK] Production build succeeded.{css_check}"
+        return f"[BUILD INFO] Build output:\n{build_result[:500]}{css_check}"
     elif (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
         return "[BUILD INFO] Python project detected - no npm build available."
     return "[BUILD INFO] No package.json found - skipping build validation."

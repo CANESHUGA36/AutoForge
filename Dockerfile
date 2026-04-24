@@ -37,7 +37,10 @@ RUN mkdir -p /templates && cd /templates && \
 
 # --- Pre-install Playwright MCP and browser ---
 # This avoids runtime npx download delays and timeouts
-RUN npm install -g @playwright/mcp@latest && \
+# Create a dummy project so 'npx playwright install' runs after dependencies exist
+RUN mkdir -p /playwright-setup && cd /playwright-setup && \
+    npm init -y && \
+    npm install @playwright/mcp@latest && \
     npx playwright install chromium
 
 # --- Python packages ---
