@@ -272,11 +272,71 @@ class Harness:
         )
         if strategy['strategy'] == 'PIVOT' and strategy.get('new_direction'):
             self.log.info(f"  New direction: {strategy['new_direction']}")
-        # Dev Server    
+        
+        # FIX: Start dev server BEFORE build gate check
+        # Builder may have started it in background; if not, try to start it here
         server_ok, server_msg = verify_dev_server(self.workspace)
+        if not server_ok:
+            self.log.info(f"[build_gate] Dev server not running, attempting to start...")
+            try:
+                import subprocess
+                import os
+                env = os.environ.copy()
+                env["NODE_ENV"] = "development"
+                # Start dev server in background
+                subprocess.Popen(
+                    ["npm", "run", "dev"],
+                    cwd=self.workspace,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    start_new_session=True,
+                )
+                # Wait and retry
+                import time as _time
+                _time.sleep(3)
+                server_ok, server_msg = verify_dev_server(self.workspace)
+            except Exception as e:
+                self.log.warning(f"[build_gate] Failed to auto-start dev server: {e}")
+        
+        # Build Gate: Dev server MUST be running to pass
         if not server_ok:
             self.log.warning(f"[build_gate] Dev server verification failed: {server_msg}")
             self.dashboard.add_alert(f"Round {round_num}: Dev server failed - {server_msg}")
+            # Treat as build failure — skip commit and evaluation
+            self.log.warning("[build_gate] Dev server not running — treating as build failure")
+            try:
+                self.git.rollback_to(
+                    self.git.get_head_hash(),
+                    f"Dev server not running in round {round_num} — rolling back"
+                )
+            except Exception:
+                pass
+            score = config.SPRINT_PASS_THRESHOLD - 1.0  # Penalty score
+            self.sprint_score_history.append(score)
+            self.overall_score_history.append(score)
+            self.score_history.append(score)
+            round_prompt = build_usage["prompt"]
+            round_completion = build_usage["completion"]
+            self.token_totals["prompt"] += round_prompt
+            self.token_totals["completion"] += round_completion
+            elapsed = time.time() - round_start
+            self.round_stats.append({
+                "round": round_num,
+                "score": score,
+                "strategy": strategy["strategy"],
+                "prompt_tokens": round_prompt,
+                "completion_tokens": round_completion,
+                "elapsed_s": elapsed,
+            })
+            log_round_stats(self.log, round_num, score, score, score,
+                           round_prompt, round_completion, elapsed)
+            self.dashboard.update_scores(score, score)
+            self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
+            return score
+        else:
+            self.log.info(f"[build_gate] Dev server verified: {server_msg}")
+        
         # FIX BUG #1: Build Gate BEFORE commit — prevent bad code from being committed
         ws_state_path = self.workspace / ".workspace_state.json"
         build_failed = False
@@ -541,10 +601,20 @@ class Harness:
                 break
 
         threshold = int(conservative * 0.8)
+        hard_limit = int(conservative * 1.2)
         budget_msg = f"""
-## Iteration Budget
+## Iteration Budget（严格限制）
 本轮保守预算：{conservative} 次迭代。
-如果已使用 >{threshold} 次，停止添加新功能，优先保证验收标准中优先级最高的 2 条。
+硬上限：{hard_limit} 次迭代（达到后强制停止）。
+
+预算使用指南：
+- 0-{int(conservative*0.4)} 次：正常编码阶段
+- {int(conservative*0.4)+1}-{threshold} 次：收尾阶段，停止新功能
+- {threshold+1}-{hard_limit} 次：仅修复阻塞性 bug
+- >{hard_limit} 次：强制停止，声明 REFINE 策略
+
+如果连续 5 次迭代都在修复同一个环境问题（如 TypeScript、npm、路径等），
+立即停止并声明 PIVOT 策略，请求重新初始化项目。
 """
         return build_task + budget_msg
 
@@ -565,21 +635,35 @@ class Harness:
         return max_rounds
 
     def _estimate_from_spec(self) -> int:
-        """从 spec.md 解析功能点，估算基础轮数"""
+        """从 spec.md 解析功能点，估算基础轮数
+        
+        修复：更准确地估算功能点数量，考虑 Phase 分层
+        """
         spec_path = self.workspace / config.SPEC_FILE
         if not spec_path.exists():
             return 5
 
         spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
-        feature_lines = [l for l in spec_text.splitlines()
-                         if l.strip().startswith("-") and "feature" in l.lower()]
-        feature_count = len(feature_lines)
-        asset_count = spec_text.count("generate_image")
-
-        rounds = 2  # 骨架 + 验收
-        rounds += feature_count // 3
-        rounds += asset_count // 2
-        return min(rounds, 8)
+        
+        # 更精确的功能计数：统计 F1, F2, ... 格式的功能编号
+        import re
+        feature_matches = re.findall(r'\*\*F\d+[:：]', spec_text)
+        feature_count = len(feature_matches)
+        
+        # 统计 Phase 数量
+        phase_matches = re.findall(r'### Phase \d+', spec_text)
+        phase_count = len(phase_matches)
+        
+        # 统计图片资源需求
+        asset_count = len(re.findall(r'generate_image|hero-gradient|theme-.*-preview|empty-state', spec_text))
+        
+        # 基础轮数：每 Phase 至少 1 轮骨架 + 1-2 轮功能
+        rounds = phase_count  # 每个 Phase 至少 1 轮
+        rounds += feature_count // 2  # 每 2 个功能约 1 轮
+        rounds += asset_count // 3   # 图片生成每 3 张约 1 轮
+        
+        # 保底：至少 3 轮，但不超过硬上限
+        return max(min(rounds, 8), 3)
 
     def _runtime_adjustment(self) -> int:
         """基于已跑轮次表现，追加或缩减"""

@@ -39,7 +39,7 @@ RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "150000"))
 # Harness 循环
 MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "0"))  # 0 = 动态计算
 MIN_ROUNDS = 3
-MAX_ROUNDS_HARD = 10
+MAX_ROUNDS_HARD = 12
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
 # 双轨评分 —— Sprint 过程门槛 + Overall 交付门槛
@@ -57,7 +57,7 @@ DIMENSION_THRESHOLDS: dict = {
 }
 
 # Agent 限制
-MAX_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "80"))
+MAX_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "50"))
 UNIT_TEST_COVERAGE_THRESHOLD = float(os.environ.get("UNIT_TEST_THRESHOLD", "0.0"))
 MAX_TOOL_ERRORS = 5
 

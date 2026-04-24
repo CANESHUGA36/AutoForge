@@ -393,6 +393,11 @@ def run_bash(command: str, timeout: int = 900) -> str:
     cmd_lower = command.lower()
     if any(kw in cmd_lower for kw in ["create-next-app", "create vite", "npx create"]):
         timeout = max(timeout, 600)
+    
+    # FIX: Short timeout for simple version/check commands to prevent hanging
+    simple_check_commands = ["tsc --version", "node --version", "npm --version", "vite --version"]
+    if any(cmd in command.lower() for cmd in simple_check_commands) and timeout > 30:
+        timeout = 30
     try:
         if is_background:
             kwargs = {
@@ -904,7 +909,39 @@ def project_init(template: str) -> str:
                 shutil.copy2(item, dest)
         # Run npm install
         install_result = run_bash("npm install 2>&1", timeout=180)
-        return f"Project initialized from {template} template.\n{install_result}"
+        
+        # FIX: Verify environment integrity after init
+        verification = []
+        
+        # Check TypeScript
+        tsc_check = run_bash("npx tsc --version 2>&1", timeout=30)
+        if "Version" in tsc_check:
+            verification.append(f"✓ TypeScript: {tsc_check.strip()}")
+        else:
+            verification.append(f"✗ TypeScript check failed: {tsc_check[:200]}")
+            # Try to fix
+            run_bash("npm install typescript --save-dev 2>&1", timeout=60)
+        
+        # Check key dependencies
+        deps_check = run_bash("npm ls react vite 2>&1 | head -5", timeout=30)
+        if "empty" not in deps_check.lower():
+            verification.append(f"✓ Key dependencies installed")
+        else:
+            verification.append(f"✗ Dependencies missing")
+        
+        # Check build works
+        build_check = run_bash("npm run build 2>&1 | tail -10", timeout=120)
+        if "error" not in build_check.lower() or "0 errors" in build_check.lower():
+            verification.append(f"✓ Build passes")
+        else:
+            verification.append(f"✗ Build failed: {build_check[:300]}")
+        
+        return (
+            f"Project initialized from {template} template.\n"
+            f"{install_result}\n\n"
+            f"--- Environment Verification ---\n"
+            f"\n".join(verification)
+        )
     except Exception as e:
         return f"[error] Failed to initialize project: {e}"
 

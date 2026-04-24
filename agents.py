@@ -257,7 +257,14 @@ class Agent:
             run_log.write_jsonl(config.WORKSPACE)
         except Exception:
             pass
-        return f"[error] Max iterations reached ({max_iter}). Stopping to preserve budget.", usage
+        # FIX: Include strategy hint when max iterations reached so Harness can respond appropriately
+        return (
+            f"[error] Max iterations reached ({max_iter}). Stopping to preserve budget.\n\n"
+            f"---\nSTRATEGY: REFINE\n"
+            f"REASON: Hit iteration limit ({max_iter}). Need to simplify approach or split task.\n"
+            f"---",
+            usage
+        )
 
     def _check_context_lifecycle(self, messages: list[dict]) -> list[dict]:
         """检查并管理上下文生命周期（支持 WorkspaceState 分层）。"""

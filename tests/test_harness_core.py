@@ -18,9 +18,16 @@ def harness_instance(mock_workspace):
 
 def test_estimate_from_spec_features(mock_workspace, harness_instance):
     spec = mock_workspace / "spec.md"
-    spec.write_text("\n".join([f"- Feature {i}: ..." for i in range(9)]))
+    # Use F1, F2 format and Phase headers to match new regex-based counting
+    spec.write_text(
+        "### Phase 1\n\n" +
+        "\n".join([f"**F{i}: Feature {i}** — user story — acceptance" for i in range(1, 10)]) +
+        "\n\n### Phase 2\n\n" +
+        "\n".join([f"**F{i+9}: Feature {i+9}** — user story — acceptance" for i in range(1, 4)])
+    )
     max_r = harness_instance._estimate_from_spec()
-    assert max_r >= 5  # 9 个功能至少 2 + 9//3 = 5 轮
+    # 2 phases + 12 features//2 + 0 assets//3 = 2 + 6 + 0 = 8, min 3 = 8
+    assert max_r >= 5
 
 
 def test_runtime_adjustment_stagnation(mock_workspace, harness_instance):
