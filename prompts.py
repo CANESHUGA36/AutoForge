@@ -26,10 +26,6 @@ BUILDER_SYSTEM = load_prompt("builder")
 REVIEWER_SYSTEM = load_prompt("reviewer")
 JUDGE_SYSTEM = load_prompt("judge")
 
-# 保留的子代理 prompt
-COMPONENT_BUILDER_SYSTEM = load_prompt("component_builder")
-UNIT_TESTER_SYSTEM = load_prompt("unit_tester")
-
 # 已删除的旧 prompt（不再使用）：
 # PLANNER_SYSTEM, CONTRACT_BUILDER_SYSTEM, SPRINT_PLANNER_SYSTEM,
 # SPRINT_CONTRACT_BUILDER_SYSTEM, CODE_REVIEWER_SYSTEM,

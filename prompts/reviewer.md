@@ -20,11 +20,11 @@
 
 ## Part 2: 浏览器测试
 
-1. 使用 `start_dev_server()` 启动服务器（不要 `npm run dev &`）
+1. Dev server 已由 Harness 启动，**不要**调用 `start_dev_server()`
 2. 检查 package.json 确定项目类型：
-   - Next.js: `start_dev_server(command="npm run dev", port=3000)`
-   - Vite: `start_dev_server(command="npm run dev", port=5173)`
-   - 单 HTML 文件: `start_dev_server(command="npx serve -s . -l 3000", port=3000)`
+   - Next.js: 端口 3000
+   - Vite: 端口 5173
+   - 单 HTML 文件: 端口 3000
 3. 对每个关键页面调用 `browser_test`：
    - 桌面端：默认视口（1280×720）
    - 移动端：viewport={"width": 375, "height": 812}
@@ -62,4 +62,4 @@
 ## 规则
 - 不读每个源文件，聚焦最重要文件
 - 不运行代码审查和浏览器测试之外的工具
-- 限制：10 次迭代以内
+- 限制：15 次迭代以内（硬限制）

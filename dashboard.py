@@ -104,7 +104,7 @@ class DashboardState:
         if self.sprint_scores:
             latest_s = self.sprint_scores[-1]
             latest_o = self.overall_scores[-1] if self.overall_scores else 0
-            lines.append(f"| Latest Score: Sprint {latest_s:.1f}/10 | Overall {latest_o:.1f}/10{'':<13}|")
+            lines.append(f"| Latest Score: Sprint {latest_s:.0%} | Overall {latest_o:.0%}{'':<17}|")
         
         # Token
         total = self.total_prompt_tokens + self.total_completion_tokens
@@ -226,6 +226,51 @@ class Dashboard:
         # 输出到日志（每轮或关键事件时）
         if self.state.phase in ("done", "failed") or self.state.agent_status in ("error", "timeout"):
             self._logger.info(f"[dashboard]\n{self.state.to_console()}")
+    
+    def subscribe_to(self, event_bus) -> None:
+        """订阅 EventBus 事件，自动更新 Dashboard 状态。"""
+        event_bus.subscribe("stage_started", self._on_stage_started)
+        event_bus.subscribe("stage_completed", self._on_stage_completed)
+        event_bus.subscribe("stage_failed", self._on_stage_failed)
+        event_bus.subscribe("stage_crashed", self._on_stage_failed)
+        event_bus.subscribe("stage_auto_fixed", self._on_stage_auto_fixed)
+    
+    def _on_stage_started(self, event) -> None:
+        self.add_event({
+            "type": "stage_started",
+            "stage": event.stage,
+            "round": event.round_num,
+        })
+    
+    def _on_stage_completed(self, event) -> None:
+        payload = event.payload or {}
+        entry = {
+            "type": "stage_completed",
+            "stage": event.stage,
+            "round": event.round_num,
+            "elapsed_s": payload.get("elapsed_s"),
+        }
+        if "score" in payload:
+            entry["score"] = payload["score"]
+        self.add_event(entry)
+    
+    def _on_stage_failed(self, event) -> None:
+        payload = event.payload or {}
+        msg = payload.get("message", "unknown failure")
+        self.add_event({
+            "type": event.type,
+            "stage": event.stage,
+            "round": event.round_num,
+            "message": msg,
+        })
+        self.add_alert(f"{event.stage}: {msg}")
+    
+    def _on_stage_auto_fixed(self, event) -> None:
+        self.add_event({
+            "type": "stage_auto_fixed",
+            "stage": event.stage,
+            "round": event.round_num,
+        })
     
     def snapshot(self) -> DashboardState:
         """获取当前状态快照"""

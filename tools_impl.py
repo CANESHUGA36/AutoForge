@@ -153,9 +153,8 @@ def validate_build() -> str:
             return f"[BUILD WARNING] Production build has errors:\n{build_result[:800]}\n[NOTE] Please fix build errors before proceeding."
         _update_workspace_build_status("ok")
         css_check = _validate_css_classes()
-        if "compiled successfully" in build_result.lower() or "build succeeded" in build_result.lower():
-            return f"[BUILD OK] Production build succeeded.{css_check}"
-        return f"[BUILD INFO] Build output:\n{build_result[:500]}{css_check}"
+        # Build succeeded (exit code = 0 and no real errors detected)
+        return f"[BUILD OK] Production build succeeded.{css_check}"
     elif (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
         return "[BUILD INFO] Python project detected - no npm build available."
     return "[BUILD INFO] No package.json found - skipping build validation."
@@ -929,18 +928,37 @@ def project_init(template: str) -> str:
         else:
             verification.append(f"✗ Dependencies missing")
         
-        # Check build works
-        build_check = run_bash("npm run build 2>&1 | tail -10", timeout=120)
-        if "error" not in build_check.lower() or "0 errors" in build_check.lower():
-            verification.append(f"✓ Build passes")
-        else:
-            verification.append(f"✗ Build failed: {build_check[:300]}")
+        # Check build works — STRICT: fail fast if build doesn't pass
+        build_check = run_bash("npm run build 2>&1 | tail -20", timeout=180)
+        exit_code_match = __import__('re').search(r'\[exit code:\s*(\d+)\]', build_check)
+        exit_code = int(exit_code_match.group(1)) if exit_code_match else None
+        build_has_error = (
+            (exit_code is not None and exit_code != 0)
+            or ("error" in build_check.lower()
+                and "0 errors" not in build_check.lower()
+                and "compiled successfully" not in build_check.lower()
+                and "build succeeded" not in build_check.lower())
+        )
+        if build_has_error:
+            env_verify = "\n".join(verification)
+            return (
+                f"[error] Project initialized from {template} template, "
+                f"but build VERIFICATION FAILED.\n"
+                f"Build output:\n{build_check[:800]}\n\n"
+                f"--- Environment Verification ---\n"
+                + env_verify +
+                f"\n✗ Build failed — environment is unstable.\n"
+                f"[ACTION REQUIRED] Do NOT write product code. "
+                f"The environment must be fixed first (re-run project_init or change template)."
+            )
         
+        verification.append(f"✓ Build passes")
+        env_verify = "\n".join(verification)
         return (
-            f"Project initialized from {template} template.\n"
+            f"[BUILD OK] Project initialized from {template} template.\n"
             f"{install_result}\n\n"
             f"--- Environment Verification ---\n"
-            f"\n".join(verification)
+            + env_verify
         )
     except Exception as e:
         return f"[error] Failed to initialize project: {e}"

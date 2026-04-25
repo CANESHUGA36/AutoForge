@@ -31,8 +31,8 @@ def test_estimate_from_spec_features(mock_workspace, harness_instance):
 
 
 def test_runtime_adjustment_stagnation(mock_workspace, harness_instance):
-    harness_instance.sprint_score_history = [5.0, 5.1, 5.2]
-    harness_instance.overall_score_history = [5.0, 5.1, 5.2]
+    harness_instance.sprint_pass_rate_history = [0.50, 0.51, 0.52]
+    harness_instance.contract_pass_rate_history = [0.50, 0.51, 0.52]
     assert harness_instance._runtime_adjustment() == -1
 
 

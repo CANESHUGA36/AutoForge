@@ -34,6 +34,37 @@ def parse_scores(text: str) -> tuple[float, float]:
     return 0.0, 0.0
 
 
+def parse_pass_rates(text: str) -> tuple[float | None, float | None]:
+    """Parse SPRINT_PASS_RATE and CONTRACT_PASS_RATE from evaluator feedback.
+
+    Returns (sprint_pass_rate, contract_pass_rate) as decimals (0.0-1.0).
+    Returns (None, None) if not found.
+    Supports formats: '65%', '65 %', '0.65', '65/100'
+    """
+    # Match patterns like: SPRINT_PASS_RATE: 65%  or  SPRINT_PASS_RATE: 0.65
+    sprint_match = re.search(
+        r'SPRINT_PASS_RATE:\s*(\d+(?:\.\d+)?)\s*%?',
+        text, re.IGNORECASE
+    )
+    contract_match = re.search(
+        r'CONTRACT_PASS_RATE:\s*(\d+(?:\.\d+)?)\s*%?',
+        text, re.IGNORECASE
+    )
+
+    sprint_rate = None
+    contract_rate = None
+
+    if sprint_match:
+        val = float(sprint_match.group(1))
+        sprint_rate = val / 100.0 if val > 1.0 else val
+
+    if contract_match:
+        val = float(contract_match.group(1))
+        contract_rate = val / 100.0 if val > 1.0 else val
+
+    return sprint_rate, contract_rate
+
+
 def parse_dimension_scores(text: str) -> dict:
     """Parse per-dimension scores from '### Dimension Name: X/10' headings."""
     _name_map = {

@@ -19,36 +19,12 @@ import config
 
 log = logging.getLogger("harness")
 
-
-class PlaywrightMCPPool:
-    """跨调用复用 Playwright + Browser 实例，按 context_id 隔离"""
-
-    def __init__(self):
-        self._bridges: dict[str, PlaywrightMCPBridge] = {}
-        self._lock = asyncio.Lock()
-
-    async def get(self, context_id: str = "default") -> PlaywrightMCPBridge:
-        async with self._lock:
-            if context_id not in self._bridges:
-                bridge = PlaywrightMCPBridge()
-                await bridge.start()
-                self._bridges[context_id] = bridge
-            return self._bridges[context_id]
-
-    async def release(self, context_id: str):
-        async with self._lock:
-            if context_id in self._bridges:
-                await self._bridges[context_id].close()
-                del self._bridges[context_id]
-
-    async def close_all(self):
-        for bridge in self._bridges.values():
-            await bridge.close()
-        self._bridges.clear()
-
-
-# 全局单例
-_pool = PlaywrightMCPPool()
+# Python 3.11+ BaseExceptionGroup compatibility — MCP SDK's stdio_client cleanup
+# may throw BaseExceptionGroup (from anyio TaskGroup) which is NOT an Exception subclass.
+try:
+    _CLEANUP_EXC_TYPES: tuple = (Exception, BaseExceptionGroup)
+except NameError:  # pragma: no cover  (< Python 3.11)
+    _CLEANUP_EXC_TYPES = (Exception,)
 
 
 def _wrap_script(script: str) -> str:
@@ -164,7 +140,9 @@ class PlaywrightMCPBridge:
                 # Use __aexit__ (symmetric with __aenter__) instead of aclose()
                 # to avoid anyio CancelScope race during asyncio.run() shutdown.
                 await self._client_ctx.__aexit__(None, None, None)
-            except Exception:
+            except _CLEANUP_EXC_TYPES:
+                # Suppress known MCP SDK cleanup race (BaseExceptionGroup from
+                # anyio TaskGroup during async generator shutdown).
                 pass
             self._client_ctx = None
 
@@ -447,22 +425,26 @@ def browser_test_mcp(
     actions: list | None = None,
     screenshot: bool = True,
     viewport: dict | None = None,
-    context_id: str = "reviewer",  # FIX BUG #7: match _build_round cleanup context_id
+    context_id: str = "reviewer",
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_test。
 
-    通过 PlaywrightMCPPool 复用 bridge 实例，避免重复启动浏览器。
+    每次调用创建独立 bridge，用完后立即关闭，避免 asyncgen 在 asyncio.run()
+    cleanup 阶段触发 anyio CancelScope 跨 task 错误。
     """
     async def _run() -> str:
+        bridge = PlaywrightMCPBridge()
+        await bridge.start()
         try:
-            bridge = await _pool.get(context_id)
             return await bridge.browser_test(url, actions, screenshot, viewport)
         except Exception as e:
-            # Bridge may be corrupted — recreate and retry once
             log.warning(f"[playwright_mcp] First attempt failed ({e}), recreating bridge...")
-            await _pool.release(context_id)
-            bridge = await _pool.get(context_id)
+            await bridge.close()
+            bridge = PlaywrightMCPBridge()
+            await bridge.start()
             return await bridge.browser_test(url, actions, screenshot, viewport)
+        finally:
+            await bridge.close()
 
     # FIX BUG #8: Avoid asyncio.run() nesting — use existing loop or fallback
     try:
@@ -470,14 +452,19 @@ def browser_test_mcp(
     except RuntimeError:
         loop = None
     if loop is not None:
-        # Already inside an event loop — run in a fresh thread with its own event loop
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            # Pass a callable, not a coroutine object, so the child thread creates its own loop
             future = executor.submit(lambda: asyncio.run(_run()))
-            return future.result()
+            try:
+                return future.result()
+            except _CLEANUP_EXC_TYPES as e:
+                log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
+                return f"[error] Browser test failed due to MCP connection cleanup race"
     try:
         return asyncio.run(_run())
+    except _CLEANUP_EXC_TYPES as e:
+        log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
+        return f"[error] Browser test failed due to MCP connection cleanup race"
     except Exception as e:
         log.warning(f"[playwright_mcp] browser_test failed: {e}")
         return f"[error] Browser test failed: {e}"
@@ -487,22 +474,25 @@ def browser_evaluate_mcp(
     script: str,
     url: str | None = None,
     viewport: dict | None = None,
-    context_id: str = "reviewer",  # FIX BUG #7: match _build_round cleanup context_id
+    context_id: str = "reviewer",
 ) -> str:
     """同步包装：调用 Playwright MCP bridge 执行 browser_evaluate。
 
-    通过 PlaywrightMCPPool 复用 bridge 实例。
+    每次调用创建独立 bridge，用完后立即关闭。
     """
     async def _run() -> str:
+        bridge = PlaywrightMCPBridge()
+        await bridge.start()
         try:
-            bridge = await _pool.get(context_id)
             return await bridge.browser_evaluate(script, url, viewport)
         except Exception as e:
-            # Bridge may be corrupted — recreate and retry once
             log.warning(f"[playwright_mcp] First attempt failed ({e}), recreating bridge...")
-            await _pool.release(context_id)
-            bridge = await _pool.get(context_id)
+            await bridge.close()
+            bridge = PlaywrightMCPBridge()
+            await bridge.start()
             return await bridge.browser_evaluate(script, url, viewport)
+        finally:
+            await bridge.close()
 
     # FIX BUG #8: Avoid asyncio.run() nesting
     try:
@@ -513,37 +503,19 @@ def browser_evaluate_mcp(
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(lambda: asyncio.run(_run()))
-            return future.result()
+            try:
+                return future.result()
+            except _CLEANUP_EXC_TYPES as e:
+                log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
+                return f"[error] browser_evaluate failed due to MCP connection cleanup race"
     try:
         return asyncio.run(_run())
+    except _CLEANUP_EXC_TYPES as e:
+        log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
+        return f"[error] browser_evaluate failed due to MCP connection cleanup race"
     except Exception as e:
         log.warning(f"[playwright_mcp] browser_evaluate failed: {e}")
         return f"[error] browser_evaluate failed: {e}"
 
 
-def close_mcp_bridge(context_id: str | None = None) -> None:
-    """关闭 MCP bridge。
 
-    如果提供了 context_id，只释放该 context 的 bridge；
-    否则关闭所有 bridge。
-    """
-    async def _run():
-        if context_id is not None:
-            await _pool.release(context_id)
-        else:
-            await _pool.close_all()
-
-    # FIX BUG #8: Avoid asyncio.run() nesting
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(lambda: asyncio.run(_run()))
-            return future.result()
-    try:
-        asyncio.run(_run())
-    except Exception as e:
-        log.warning(f"[playwright_mcp] close_mcp_bridge failed: {e}")

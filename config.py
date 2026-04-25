@@ -46,6 +46,10 @@ PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 SPRINT_PASS_THRESHOLD = float(os.environ.get("SPRINT_PASS_THRESHOLD", "6.0"))
 SIGNIFICANT_DROP = float(os.environ.get("SIGNIFICANT_DROP", "1.0"))
 
+# 双轨通过率评分体系
+SPRINT_PASS_RATE_THRESHOLD = float(os.environ.get("SPRINT_PASS_RATE_THRESHOLD", "0.70"))
+CONTRACT_PASS_RATE_THRESHOLD = float(os.environ.get("CONTRACT_PASS_RATE_THRESHOLD", "0.75"))
+
 # Per-dimension hard thresholds — if any dimension scores below its threshold,
 # the sprint is forced to fail regardless of the overall score.
 # Keys must match the canonical names returned by Harness._parse_dimension_scores().
@@ -60,6 +64,15 @@ DIMENSION_THRESHOLDS: dict = {
 MAX_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "50"))
 UNIT_TEST_COVERAGE_THRESHOLD = float(os.environ.get("UNIT_TEST_THRESHOLD", "0.0"))
 MAX_TOOL_ERRORS = 5
+
+# Per-agent 迭代限制（覆盖 MAX_ITERATIONS）
+AGENT_ITERATION_LIMITS = {
+    "architect": int(os.environ.get("MAX_ITERATIONS_ARCHITECT", "30")),
+    "sprint_master": int(os.environ.get("MAX_ITERATIONS_SPRINT_MASTER", "15")),
+    "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "50")),
+    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "15")),
+    "judge": int(os.environ.get("MAX_ITERATIONS_JUDGE", "10")),
+}
 
 # 路径
 WORKSPACE = os.path.abspath(os.environ.get("HARNESS_WORKSPACE", "./workspace"))

@@ -105,7 +105,7 @@ class Agent:
         
         Args:
             user_prompt: The task prompt for the agent.
-            max_iterations: Override the default MAX_ITERATIONS. If None, uses config.MAX_ITERATIONS.
+            max_iterations: Override the default MAX_ITERATIONS. If None, uses config.AGENT_ITERATION_LIMITS.
         """
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -118,12 +118,31 @@ class Agent:
         AGENT_TIME_LIMIT_S = 3600
 
         usage: dict[str, int] = {"prompt": 0, "completion": 0}
-        max_iter = max_iterations or config.MAX_ITERATIONS
+        # FIX: Use per-agent iteration limits from config
+        if max_iterations is not None:
+            max_iter = max_iterations
+        else:
+            agent_key = self.name.lower().replace(" ", "_")
+            max_iter = config.AGENT_ITERATION_LIMITS.get(agent_key, config.MAX_ITERATIONS)
 
         # 初始化 WorkspaceState（如果启用）
         if self.use_state:
             self._workspace_state = WorkspaceState.load(config.WORKSPACE)
             self._log.info(f"[{self.name}] WorkspaceState loaded: {self._workspace_state.total_files} files")
+
+        # Env-fix budget tracking (Builder only)
+        _ENV_FIX_PATTERNS = [
+            r'npm\s+(install|ci|update|rebuild)',
+            r'node_modules',
+            r'\btsc\b',
+            r'typescript',
+            r'vite\.config',
+            r'tsconfig',
+            r'package-lock\.json',
+        ]
+        _ENV_FIX_TOOLS = {"run_bash", "validate_build", "project_init"}
+        _MAX_CONSECUTIVE_ENV_FIX = 5
+        consecutive_env_fixes = 0
 
         for iteration in range(1, max_iter + 1):
             elapsed = time.time() - start_time
@@ -244,6 +263,33 @@ class Agent:
                     "result_len": len(result),
                 })
                 run_log.iterations.append({"iteration": iteration, "tool": name})
+
+                # Env-fix budget enforcement (Builder only)
+                if self.name == "Builder" and name in _ENV_FIX_TOOLS:
+                    tool_text = json.dumps(arguments).lower()
+                    if any(__import__('re').search(p, tool_text) for p in _ENV_FIX_PATTERNS):
+                        consecutive_env_fixes += 1
+                        if consecutive_env_fixes >= _MAX_CONSECUTIVE_ENV_FIX:
+                            self._log.warning(
+                                f"[{self.name}] {consecutive_env_fixes} consecutive env-fix tool calls detected. "
+                                f"Forcing PIVOT to prevent token waste."
+                            )
+                            run_log.final_status = "env_fix_budget_exceeded"
+                            run_log.emit()
+                            return (
+                                f"[error] Agent stopped: {consecutive_env_fixes} consecutive environment-fix "
+                                f"tool calls detected (npm install, tsc, node_modules, etc.).\n\n"
+                                f"---\nSTRATEGY: PIVOT\n"
+                                f"REASON: Environment is unstable. The build system or dependencies are broken. "
+                                f"Do NOT waste more iterations on npm/TypeScript fixes. "
+                                f"Request project re-initialization or a simpler approach.\n"
+                                f"---",
+                                usage,
+                            )
+                    else:
+                        consecutive_env_fixes = 0
+                elif self.name == "Builder":
+                    consecutive_env_fixes = 0
 
                 messages.append({
                     "role": "tool",
