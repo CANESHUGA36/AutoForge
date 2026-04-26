@@ -267,7 +267,11 @@ class Agent:
                 # Env-fix budget enforcement (Builder only)
                 if self.name == "Builder" and name in _ENV_FIX_TOOLS:
                     tool_text = json.dumps(arguments).lower()
-                    if any(__import__('re').search(p, tool_text) for p in _ENV_FIX_PATTERNS):
+                    is_env_fix = (
+                        name == "project_init"
+                        or any(__import__('re').search(p, tool_text) for p in _ENV_FIX_PATTERNS)
+                    )
+                    if is_env_fix:
                         consecutive_env_fixes += 1
                         if consecutive_env_fixes >= _MAX_CONSECUTIVE_ENV_FIX:
                             self._log.warning(

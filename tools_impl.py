@@ -386,8 +386,38 @@ def _smart_truncate(stdout: str, stderr: str, limit: int = 10_000) -> str:
 
 
 
+_PROTECTED_PATHS = [
+    ".eval_cache", ".events", "logs", ".git", ".workspace_state.json",
+    "harness_state.json", "contract.md", "spec.md", "sprint.md", "feedback.md",
+]
+
+def _is_destructive_command(command: str) -> tuple[bool, str]:
+    """Check if a command would delete protected system directories."""
+    cmd_lower = command.lower()
+    # Detect rm -rf, rm -r, del /s patterns
+    is_removal = any(pattern in cmd_lower for pattern in [
+        "rm -rf ", "rm -r ", "rmdir /s", "del /s", "remove-item -recurse",
+    ])
+    if not is_removal:
+        return False, ""
+    for protected in _PROTECTED_PATHS:
+        if protected.lower() in cmd_lower:
+            return True, protected
+    return False, ""
+
 def run_bash(command: str, timeout: int = 900) -> str:
     command = command.strip()
+    
+    # Block destructive commands against protected paths
+    is_destructive, protected_path = _is_destructive_command(command)
+    if is_destructive:
+        return (
+            f"[error] Command blocked: would delete protected path '{protected_path}'. "
+            f"The following paths are protected and cannot be removed: "
+            f"{', '.join(_PROTECTED_PATHS)}. "
+            f"If you need to clean build artifacts, only remove: node_modules, dist, build, .next, *.log"
+        )
+    
     is_background = command.endswith("&") or " & " in command
     cmd_lower = command.lower()
     if any(kw in cmd_lower for kw in ["create-next-app", "create vite", "npx create"]):
@@ -906,6 +936,14 @@ def project_init(template: str) -> str:
                 shutil.copytree(item, dest)
             else:
                 shutil.copy2(item, dest)
+        # Clean up any pre-existing corrupted node_modules from template copy
+        # to force a fresh install (fixes broken symlinks / partial installs)
+        nm_path = ws / "node_modules"
+        lock_path = ws / "package-lock.json"
+        if nm_path.exists():
+            shutil.rmtree(nm_path)
+        if lock_path.exists():
+            lock_path.unlink()
         # Run npm install
         install_result = run_bash("npm install 2>&1", timeout=180)
         

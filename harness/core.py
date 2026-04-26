@@ -447,10 +447,15 @@ class Harness:
         # Step 2: Judge
         self.log.info("Evaluate phase — Step 2: Judge (pass-rate scoring)")
         self.dashboard.start_agent("Judge")
-        review_report = self.eval_cache.get_full_report(round_num) or ""
+        # Judge reads the full Reviewer report directly from disk
+        review_report_path = self.workspace / ".eval_cache" / f"round_{round_num}_review.md"
         review_hint = ""
-        if review_report:
-            review_hint = f"\n\nReviewer report for this round:\n{review_report[:4000]}\n\n"
+        if review_report_path.exists():
+            review_hint = (
+                f"\n\nIMPORTANT: Read the complete Reviewer report at "
+                f"`.eval_cache/round_{round_num}_review.md` before scoring. "
+                f"The Reviewer's browser test results are the highest-priority evidence.\n\n"
+            )
         judge_task = (
             f"Round {round_num} evaluation.\n\n"
             f"Read {config.SPRINT_FILE}, {config.CONTRACT_FILE}, "

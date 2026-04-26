@@ -22,6 +22,7 @@ class EvalCache:
 
     def save_round(self, round_num: int, review_result: str) -> None:
         """保存 Reviewer 统一报告"""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         review_path = self.cache_dir / f"round_{round_num}_review.md"
         review_path.write_text(review_result, encoding="utf-8")
 
