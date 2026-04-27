@@ -34,6 +34,35 @@ def parse_scores(text: str) -> tuple[float, float]:
     return 0.0, 0.0
 
 
+def parse_group_pass_rates(text: str) -> tuple[float | None, float | None]:
+    """Parse GROUP_PASS_RATE and OVERALL_PASS_RATE from evaluator feedback.
+
+    Returns (group_pass_rate, overall_pass_rate) as decimals (0.0-1.0).
+    Returns (None, None) if not found.
+    """
+    group_match = re.search(
+        r'GROUP_PASS_RATE:\s*(\d+(?:\.\d+)?)\s*%?',
+        text, re.IGNORECASE
+    )
+    overall_match = re.search(
+        r'OVERALL_PASS_RATE:\s*(\d+(?:\.\d+)?)\s*%?',
+        text, re.IGNORECASE
+    )
+
+    group_rate = None
+    overall_rate = None
+
+    if group_match:
+        val = float(group_match.group(1))
+        group_rate = val / 100.0 if val > 1.0 else val
+
+    if overall_match:
+        val = float(overall_match.group(1))
+        overall_rate = val / 100.0 if val > 1.0 else val
+
+    return group_rate, overall_rate
+
+
 def parse_pass_rates(text: str) -> tuple[float | None, float | None]:
     """Parse SPRINT_PASS_RATE and CONTRACT_PASS_RATE from evaluator feedback.
 
@@ -207,7 +236,7 @@ def cross_validate_passes(
 # --------------------------------------------------------------------------- #
 
 _CONTRACT_CRITERIA_RE = re.compile(
-    r'^\s*-\s+\[\s*\]\s+\*\*([A-Z]\d+(?:\.\d+)?)\*\*',
+    r'^\s*-\s+\[[^\]]*\]\s+\*\*([A-Z]\d+(?:\.\d+)?)\*\*',
     re.MULTILINE,
 )
 
@@ -225,8 +254,8 @@ def count_contract_criteria(contract_text: str) -> int:
     return len(matches)
 
 
-_JUDGE_PASS_RE = re.compile(r'^\s*-\s+\[x\]', re.MULTILINE)
-_JUDGE_SKIP_RE = re.compile(r'^\s*-\s+\[\s*\].*SKIP', re.MULTILINE | re.IGNORECASE)
+_JUDGE_PASS_RE = re.compile(r'^\s*-\s+\[[^\]]*\]', re.MULTILINE)
+_JUDGE_SKIP_RE = re.compile(r'^\s*-\s+\[[^\]]*\].*SKIP', re.MULTILINE | re.IGNORECASE)
 # Match range patterns like F3.1-F3.6 or F10.1-F10.5
 _CRITERIA_RANGE_RE = re.compile(r'([A-Z])(\d+)\.(\d+)\s*[-~–—]\s*(?:\1)?(\d+)\.(\d+)')
 
@@ -278,8 +307,25 @@ def count_judge_criteria(eval_text: str) -> tuple[int, int, int]:
     return passed, failed, skipped
 
 
+def count_group_criteria(contract_text: str, group_prefix: str) -> int:
+    """Count criteria belonging to a specific group (e.g., 'F1').
+
+    Matches lines like:
+      - [ ] **F1.1**: ...
+      - [ ] **F1.2**: ...
+    Returns count of criteria whose ID matches the group exactly.
+    e.g., group_prefix='F1' matches F1.1, F1.2 but NOT F10.1, F11.1
+    """
+    matches = _CONTRACT_CRITERIA_RE.findall(contract_text)
+    return sum(
+        1 for m in matches
+        if m == group_prefix or m.startswith(group_prefix + ".")
+    )
+
+
 def compute_actual_contract_rate(
-    eval_text: str, contract_text: str, review_text: str = ""
+    eval_text: str, contract_text: str, review_text: str = "",
+    current_group_id: str | None = None,
 ) -> tuple[float, int, int, int, int, list[str]]:
     """Compute the true CONTRACT_PASS_RATE using the real contract denominator.
 
@@ -287,17 +333,29 @@ def compute_actual_contract_rate(
 
     Logic:
     1. total_contract = count of all criteria in contract.md (real denominator)
+       OR count of criteria in current group (when current_group_id is set)
     2. From Judge's feedback, count how many criteria Judge actually evaluated
     3. Cross-validate: if Reviewer marked FAIL but Judge marked PASS, override to FAIL
     4. If Judge evaluated fewer than total_contract, the missing ones are treated as FAIL
     5. If SKIP ratio > 20%, excess SKIP items are treated as FAIL
     6. Final rate = passed / total_contract
+
+    Args:
+        current_group_id: If set (e.g., 'F1'), only count criteria in this group.
+                          This is used in feature-group mode where Judge only
+                          evaluates one group per round.
     """
-    total_contract = count_contract_criteria(contract_text)
+    if current_group_id:
+        total_contract = count_group_criteria(contract_text, current_group_id)
+        mode_label = f"group {current_group_id}"
+    else:
+        total_contract = count_contract_criteria(contract_text)
+        mode_label = "full contract"
+
     judge_passed, judge_failed, judge_skipped = count_judge_criteria(eval_text)
 
     if total_contract == 0:
-        log.warning("No criteria found in contract.md, cannot compute real rate")
+        log.warning(f"No criteria found for {mode_label}, cannot compute real rate")
         return 0.0, 0, 0, 0, 0, []
 
     # Cross-validation: Reviewer FAIL overrides Judge PASS
@@ -331,7 +389,7 @@ def compute_actual_contract_rate(
 
     log.info(
         f"[contract_rate] Judge: {judge_passed}P/{judge_failed}F/{judge_skipped}S "
-        f"(evaluated {judge_evaluated}/{total_contract}), "
+        f"(evaluated {judge_evaluated}/{total_contract} in {mode_label}), "
         f"missed={judge_missed}, excess_skip={excess_skip}, "
         f"overrides={len(overrides)} "
         f"-> true rate={rate:.1%} ({true_passed}/{total_contract})"

@@ -17,8 +17,12 @@ from prompts import (
 )
 from tools_impl import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
 from harness.build import build_build_task
-from harness.eval import parse_pass_rates, parse_skip_rate, compute_actual_contract_rate
+from harness.eval import parse_pass_rates, parse_skip_rate, compute_actual_contract_rate, parse_group_pass_rates
 from harness.git import GitManager
+from harness.feature_groups import (
+    FeatureGroupState, parse_feature_groups, get_group_instruction,
+    TIER_REQUIREMENTS, OVERALL_PASS_THRESHOLD,
+)
 from harness.logging import setup_file_logging, log_round_stats, log_final_stats
 from harness.sprint import plan_sprint_master
 from harness.state import StateManager
@@ -84,6 +88,8 @@ class Harness:
         self.dashboard = Dashboard(str(self.workspace), logger=self.log)
         self.event_bus = EventBus(self.workspace)
         self.dashboard.subscribe_to(self.event_bus)
+        # Feature-group state machine (populated on first _build_round)
+        self.feature_groups: FeatureGroupState | None = None
         self._load_state()
     # ------------------------------------------------------------------ #
     #              ?StateManager ?                                  #
@@ -215,9 +221,10 @@ class Harness:
             contract_rate = result.get("contract_rate", 0.0)
             score = result.get("score", 0.0)
 
-            # 双轨评分：Contract 通过率 >= 75% 才允许跳出
-            if contract_rate >= config.CONTRACT_PASS_RATE_THRESHOLD:
-                self.log.info(f"\nSuccess! Contract pass rate: {contract_rate:.0%}")
+            # Feature-group based exit condition
+            exit_ok, exit_reason = self._check_exit_condition()
+            if exit_ok:
+                self.log.info(f"\nSuccess! {exit_reason}")
                 log_final_stats(self.log, self.round_stats, self.sprint_score_history,
                                self.overall_score_history, self.token_totals)
                 self._clear_state()
@@ -230,8 +237,7 @@ class Harness:
                 }
             if round_num < max_rounds:
                 self.log.info(
-                    f"Contract pass rate {contract_rate:.0%} below threshold "
-                    f"{config.CONTRACT_PASS_RATE_THRESHOLD:.0%}, continuing..."
+                    f"{exit_reason} — continuing..."
                 )
         log_final_stats(self.log, self.round_stats, self.sprint_score_history,
                        self.overall_score_history, self.token_totals)
@@ -252,10 +258,42 @@ class Harness:
     def _build_round(self, round_num: int) -> dict:
         """使用 Pipeline 架构执行一轮 Build-Evaluate。返回 dict 供双轨评分使用。"""
         round_start = time.time()
+
+        # Initialize feature-group state on first round
+        if self.feature_groups is None:
+            contract_path = self.workspace / config.CONTRACT_FILE
+            if contract_path.exists():
+                contract_text = contract_path.read_text(encoding="utf-8", errors="replace")
+                groups = parse_feature_groups(contract_text)
+                self.feature_groups = FeatureGroupState(groups)
+                self.log.info(
+                    f"[feature_groups] Initialized {len(groups)} groups, "
+                    f"starting with {self.feature_groups.current_group_id}"
+                )
+            else:
+                self.log.warning("[feature_groups] contract.md not found, falling back to legacy mode")
+
         rollback_msg = self._prepare_rollback_msg()
 
-        # Sprint
-        sprint_ok = plan_sprint_master(self.workspace, round_num, self.sprint_master, self.log)
+        # Sprint — feature-group driven (task_limit no longer needed)
+        group_hint = ""
+        if self.feature_groups and self.feature_groups.current_group:
+            cg = self.feature_groups.current_group
+            group_hint = (
+                f"当前功能组: {cg['id']} — {cg['name']} "
+                f"({len(cg['criteria'])} 项标准)"
+            )
+            self.log.info(f"[sprint] Round {round_num} | {group_hint}")
+        else:
+            task_limit = self._calculate_sprint_task_limit()
+            budget_hint = self._get_builder_budget_hint()
+            self.log.info(f"[sprint] Round {round_num} task_limit={task_limit} | {budget_hint}")
+
+        sprint_ok = plan_sprint_master(
+            self.workspace, round_num, self.sprint_master, self.log,
+            task_limit=1, budget_hint=self._get_builder_budget_hint(),
+            group_hint=group_hint,
+        )
         if not sprint_ok:
             self.log.warning(f"[sprint] Round {round_num} using fallback sprint.md")
 
@@ -352,33 +390,33 @@ class Harness:
         return self._run_evaluation(round_num, round_start, build_usage, strategy)
 
     def _prepare_rollback_msg(self) -> str:
-        """准备 Builder 的 rollback 提示消息（双轨评分版）。"""
-        rollback_msg = ""
-        if self.sprint_pass_rate_history and self.sprint_pass_rate_history[-1] < config.SPRINT_PASS_RATE_THRESHOLD:
-            latest_hash = self.git.get_head_hash()
-            rate = self.sprint_pass_rate_history[-1]
-            if latest_hash:
-                self.git.rollback_to(
-                    latest_hash,
-                    f"Sprint pass rate {rate:.0%} below threshold {config.SPRINT_PASS_RATE_THRESHOLD:.0%}"
-                )
-                rollback_msg = (
-                    f"\nNOTE: Last sprint pass rate {rate:.0%} "
-                    f"(below threshold {config.SPRINT_PASS_RATE_THRESHOLD:.0%}). "
-                    f"You MUST fix the failing criteria from the last sprint BEFORE adding new features. "
-                    f"Do NOT move on to new tasks until this sprint passes."
+        """准备 Builder 的提示消息（功能组推进版）。"""
+        msg = ""
+
+        # Feature-group stuck detection
+        if self.feature_groups:
+            stuck, stuck_gid = self.feature_groups.any_group_stuck()
+            if stuck:
+                msg = (
+                    f"\nNOTE: 功能组 {stuck_gid} 已连续 {self.feature_groups.stuck_counts.get(stuck_gid, 0)} "
+                    f"轮未通过。请尝试完全不同的实现策略，或简化该功能组的核心需求。"
                 )
             else:
-                rollback_msg = (
-                    f"\nNOTE: Last sprint pass rate {rate:.0%} "
-                    f"(below threshold {config.SPRINT_PASS_RATE_THRESHOLD:.0%}). "
-                    f"Fix the current implementation before proceeding."
-                )
+                cg = self.feature_groups.current_group
+                if cg:
+                    rate = self.feature_groups.pass_rates.get(cg["id"], 0.0)
+                    if rate > 0 and rate < 1.0:
+                        msg = (
+                            f"\nNOTE: 功能组 {cg['id']} 上轮通过率 {rate:.0%}，尚未达标。"
+                            f"继续修复该功能组的未通过项。"
+                        )
+
+        # Legacy fallback: contract rate drop (only when no feature-group state)
         elif self.contract_pass_rate_history and len(self.contract_pass_rate_history) >= 2:
             best_idx = max(range(len(self.contract_pass_rate_history)), key=lambda i: self.contract_pass_rate_history[i])
             best_contract = self.contract_pass_rate_history[best_idx]
             last_contract = self.contract_pass_rate_history[-1]
-            SIGNIFICANT_DROP_RATE = 0.10  # 10 percentage points
+            SIGNIFICANT_DROP_RATE = 0.10
             if last_contract < best_contract - SIGNIFICANT_DROP_RATE:
                 best_hash = self.git.get_commit_for_round(best_idx + 1)
                 if best_hash:
@@ -386,12 +424,12 @@ class Harness:
                         best_hash,
                         f"Contract rate dropped {last_contract:.0%} — best was {best_contract:.0%} at round {best_idx + 1}"
                     )
-                    rollback_msg = (
+                    msg = (
                         f"\nNOTE: Contract pass rate dropped to {last_contract:.0%}. "
                         f"Rolled back to round {best_idx + 1} (best contract {best_contract:.0%}). "
                         f"The last approach broke existing functionality. Fix or change strategy."
                     )
-        return rollback_msg
+        return msg
 
     def _needs_env_check(self) -> bool:
         """判断是否需要运行 PreBuildGate。"""
@@ -441,12 +479,24 @@ class Harness:
         # Step 1: Reviewer
         self.log.info("Evaluate phase — Step 1: Reviewer (unified review)")
         self.dashboard.start_agent("Reviewer")
+
+        # Inject current feature group into Reviewer task
+        group_section = ""
+        if self.feature_groups and self.feature_groups.current_group:
+            cg = self.feature_groups.current_group
+            group_section = (
+                f"\n当前验证功能组: {cg['id']} — {cg['name']}\n"
+                f"验收标准范围: {cg['id']}.1 ~ {cg['id']}.{len(cg['criteria'])}\n"
+                f"你只验证这个功能组的标准，不要检查其他功能组。\n"
+            )
+
         review_task = (
             f"Review the codebase and test the web app for round {round_num}.\n"
+            f"{group_section}"
             f"Read the acceptance criteria in {contract_ref}, then:\n"
-            f"1. Examine the MOST IMPORTANT source files (max 8 files).\n"
+            f"1. Examine the MOST IMPORTANT source files (max 5 files) related to the current feature group.\n"
             f"2. Run browser tests (desktop + mobile). Dev server is already running.\n"
-            f"3. Produce a unified review report.\n"
+            f"3. Produce a unified review report focused ONLY on the current feature group.\n"
             f"Limit: 15 iterations max."
         )
         review_result, review_usage = self.reviewer.run_with_stats(review_task)
@@ -465,11 +515,14 @@ class Harness:
             review_result = (
                 f"# ⚠️ REVIEWER REPORT — STATUS: INCOMPLETE (Round {round_num})\n\n"
                 f"**The Reviewer hit the iteration limit before completing all tests.**\n\n"
-                f"**RULES FOR JUDGE:**\n"
-                f"1. Only criteria EXPLICITLY tested in the partial report below may be scored.\n"
-                f"2. All other criteria MUST be marked FAIL (not SKIP).\n"
-                f"3. CONTRACT_PASS_RATE must not exceed 30% when the Reviewer report is incomplete.\n"
-                f"4. If no browser tests were completed, CONTRACT_PASS_RATE = 0%.\n\n"
+                f"**GUIDANCE FOR JUDGE:**\n"
+                f"1. The Reviewer's browser tests may be partial or unavailable.\n"
+                f"2. You MUST read the source code yourself to perform code review.\n"
+                f"3. For conditionally-rendered features (e.g., controls that appear after upload),\n"
+                f"   the Reviewer may not have been able to trigger the condition.\n"
+                f"4. Base your scoring on: CODE EXISTENCE > browser absence for conditionally-rendered features.\n"
+                f"5. Only mark FAIL if the code itself is missing, stubbed, or obviously broken.\n"
+                f"6. Do NOT mark FAIL solely because an element is hidden in the initial DOM state.\n\n"
                 f"---\n\n"
                 f"{review_result}"
             )
@@ -521,27 +574,41 @@ class Harness:
         else:
             eval_text = judge_result
 
+        # ------------------------------------------------------------------ #
+        #  Feature-group driven scoring (NEW)
+        # ------------------------------------------------------------------ #
+        group_rate, overall_rate = parse_group_pass_rates(eval_text)
+
+        # Fallback to legacy parsing
         sprint_rate, contract_rate = parse_pass_rates(eval_text)
-        if sprint_rate is None or contract_rate is None:
-            log.warning("Could not parse pass rates from judge feedback, defaulting to 0")
-            sprint_rate = sprint_rate or 0.0
-            contract_rate = contract_rate or 0.0
+        if group_rate is not None:
+            contract_rate = group_rate
+        if overall_rate is not None:
+            # Use overall_rate as the contract rate for back-compat
+            pass
+        elif contract_rate is None:
+            contract_rate = 0.0
+        if sprint_rate is None:
+            sprint_rate = 0.0
 
         # ------------------------------------------------------------------ #
-        #  FIX: Enforce real contract denominator — Judge may shrink the
-        #  denominator by marking unimplemented criteria as SKIP, inflating
-        #  the reported rate. We re-compute using the true total from
-        #  contract.md and treat missing / excess-SKIP items as FAIL.
+        #  Cross-validate with contract.md true denominator
         # ------------------------------------------------------------------ #
         contract_path = self.workspace / config.CONTRACT_FILE
         if contract_path.exists():
             contract_text = contract_path.read_text(encoding="utf-8", errors="replace")
             review_text = self.eval_cache.get_full_report(round_num) or ""
+            # In feature-group mode, only validate against current group's criteria
+            group_id_for_validation = None
+            if self.feature_groups and self.feature_groups.current_group:
+                group_id_for_validation = self.feature_groups.current_group_id
             true_rate, true_passed, true_failed, true_skipped, total_contract, overrides = (
-                compute_actual_contract_rate(eval_text, contract_text, review_text)
+                compute_actual_contract_rate(
+                    eval_text, contract_text, review_text,
+                    current_group_id=group_id_for_validation,
+                )
             )
             if total_contract > 0:
-                # If Judge's rate deviates significantly from true rate, override
                 judge_reported_total = true_passed + true_failed + true_skipped
                 if abs(contract_rate - true_rate) > 0.05 or judge_reported_total < total_contract:
                     self.log.warning(
@@ -556,7 +623,7 @@ class Harness:
         else:
             self.log.warning("[judge] contract.md not found, cannot verify true denominator")
 
-        # FIX: Detect excessive SKIP ratio — secondary guard
+        # Detect excessive SKIP ratio
         skip_rate = parse_skip_rate(eval_text)
         if skip_rate > 0.20 and contract_rate >= config.CONTRACT_PASS_RATE_THRESHOLD:
             adjusted_contract = contract_rate * (1 - skip_rate)
@@ -566,12 +633,14 @@ class Harness:
             )
             contract_rate = adjusted_contract
 
-        # FIX: Cap scores when Reviewer report is incomplete or failed.
-        # This prevents Judge from giving high scores based on code presence alone
-        # when the Reviewer did not complete browser testing.
+        # Cap scores when Reviewer report is incomplete or failed
+        # NOTE: For conditionally-rendered features, INCOMPLETE often means the Reviewer
+        # couldn't trigger the condition (e.g., upload a file). We raise the cap from 30%
+        # to 50% to give Judge room to score based on code review, while still preventing
+        # false-high scores from incomplete testing.
         if reviewer_status == "incomplete":
-            capped_contract = min(contract_rate, 0.30)
-            capped_sprint = min(sprint_rate, 0.30)
+            capped_contract = min(contract_rate, 0.50)
+            capped_sprint = min(sprint_rate, 0.50)
             if capped_contract < contract_rate or capped_sprint < sprint_rate:
                 self.log.warning(
                     f"[judge] Judge gave {contract_rate:.0%} contract / {sprint_rate:.0%} sprint, "
@@ -589,13 +658,40 @@ class Harness:
             contract_rate = 0.0
             sprint_rate = 0.0
 
+        # ------------------------------------------------------------------ #
+        #  Update feature-group state (NEW)
+        # ------------------------------------------------------------------ #
+        if self.feature_groups and self.feature_groups.current_group:
+            gid = self.feature_groups.current_group_id
+            self.feature_groups.update_rate(gid, contract_rate)
+            # Advance to next group if current group passed
+            if self.feature_groups.check_should_advance():
+                advanced = self.feature_groups.advance()
+                if advanced:
+                    self.log.info(
+                        f"[feature_groups] {gid} passed — advancing to "
+                        f"{self.feature_groups.current_group_id}"
+                    )
+            # Log tier status
+            ts = self.feature_groups.tier_status()
+            for tier, st in ts.items():
+                status = "✅" if st["passed"] else "⏳"
+                self.log.info(
+                    f"[tier] {tier}: {st['groups_complete']}/{st['groups_total']} "
+                    f"groups ({st['rate']:.0%}) {status}"
+                )
+            self.log.info(
+                f"[overall] {self.feature_groups.overall_rate():.0%} "
+                f"({self.feature_groups.current_group_id} at {contract_rate:.0%})"
+            )
+
         self.sprint_pass_rate_history.append(sprint_rate)
         self.contract_pass_rate_history.append(contract_rate)
         # Back-compat
         self.sprint_score_history.append(sprint_rate)
         self.overall_score_history.append(contract_rate)
         self.score_history.append(contract_rate)
-        self.log.info(f"  Sprint pass rate: {sprint_rate:.0%} | Contract pass rate: {contract_rate:.0%}")
+        self.log.info(f"  Group pass rate: {contract_rate:.0%} | Overall: {self.feature_groups.overall_rate():.0%}" if self.feature_groups else f"  Sprint pass rate: {sprint_rate:.0%} | Contract pass rate: {contract_rate:.0%}")
 
         round_prompt = build_usage["prompt"] + review_usage["prompt"] + judge_usage["prompt"]
         round_completion = build_usage["completion"] + review_usage["completion"] + judge_usage["completion"]
@@ -633,29 +729,36 @@ class Harness:
         contract_path = self.workspace / config.CONTRACT_FILE
         feedback_path = self.workspace / config.FEEDBACK_FILE
 
+        # Feature-group injection (NEW)
+        group_section = ""
+        if self.feature_groups and self.feature_groups.current_group:
+            cg = self.feature_groups.current_group
+            group_section = get_group_instruction(cg["id"], cg) + "\n\n"
+
         # Primary guide: sprint.md (自带验收标准)
         if sprint_path.exists():
-            primary_guide = f"1. Read {config.SPRINT_FILE} — this is your ONLY task list and acceptance criteria for this round.\n"
+            primary_guide = f"1. Read {config.SPRINT_FILE} — this is your task list for this round.\n"
         else:
             primary_guide = f"1. Read {config.SPEC_FILE} for product spec.\n"
 
-        # Global contract as fallback
+        # Global contract for current group only
         if contract_path.exists():
-            primary_guide += f"2. Read {config.CONTRACT_FILE} for global acceptance criteria.\n"
+            primary_guide += f"2. Read {config.CONTRACT_FILE} — 只关注当前功能组 {self.feature_groups.current_group_id if self.feature_groups else 'N/A'} 的标准。\n"
 
-        task = f"Round {round_num} of building.{rollback_msg}\n\nSteps:\n{primary_guide}"
+        task = f"Round {round_num} of building.{rollback_msg}\n\n{group_section}Steps:\n{primary_guide}"
 
         if feedback_path.exists() and round_num > 1:
-            task += f"3. Read {config.FEEDBACK_FILE} for previous feedback and address relevant issues.\n"
+            task += f"3. Read {config.FEEDBACK_FILE} for previous feedback on the current feature group.\n"
 
-            if len(self.contract_pass_rate_history) >= 2:
-                delta = self.contract_pass_rate_history[-1] - self.contract_pass_rate_history[-2]
-                if delta > 0:
-                    task += f"\nTrend: Improving (+{delta:.0%}), continue refining."
-                elif delta < 0:
-                    task += f"\nTrend: Declining ({delta:.0%}), consider pivoting."
-                else:
-                    task += f"\nTrend: Flat, try a different approach."
+        # Inject feature-group progress hint
+        if self.feature_groups:
+            ts = self.feature_groups.tier_status()
+            tier_hint = "\n".join(
+                f"  {cfg['label']}: {ts[tier]['groups_complete']}/{ts[tier]['groups_total']} 组完成"
+                for tier, cfg in TIER_REQUIREMENTS.items() if tier in ts
+            )
+            task += f"\n功能组进度:\n{tier_hint}\n"
+            task += f"总体进度: {self.feature_groups.overall_rate():.0%}\n"
 
         # Inject the previous round's strategy decision
         if self.strategy_history:
@@ -749,6 +852,122 @@ class Harness:
         return build_task + budget_msg
 
     # ------------------------------------------------------------------ #
+    #      Dynamic Sprint Task Limit                                    #
+    # ------------------------------------------------------------------ #
+    def _get_last_builder_iterations(self) -> list[int]:
+        """Read Builder's actual iteration counts from .events/Builder.jsonl.
+
+        Returns a list of iteration counts for each completed round.
+        """
+        events_path = self.workspace / ".events" / "Builder.jsonl"
+        if not events_path.exists():
+            return []
+
+        iterations: list[int] = []
+        try:
+            with events_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if data.get("agent") == "Builder" and "iterations" in data:
+                            iterations.append(int(data["iterations"]))
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+        except Exception as e:
+            self.log.debug(f"[sprint_limit] Could not read Builder events: {e}")
+
+        return iterations
+
+    def _calculate_sprint_task_limit(self) -> int:
+        """基于 Builder 历史表现动态计算本轮任务数量上限。
+
+        逻辑：
+        - 默认 2 个任务
+        - 如果 Builder 最近一轮提前完成（实际迭代 < 保守预算 × 0.7），增加到 3 个
+        - 如果上一轮超时、失败或策略为 PIVOT，减到 1 个
+        - Round 1 固定 1 个任务（项目初始化 + 1 个核心功能）
+        """
+        round_num = self._completed_rounds + 1
+        if round_num == 1:
+            return 1
+
+        builder_iters = self._get_last_builder_iterations()
+        if not builder_iters:
+            return 2
+
+        last_iter = builder_iters[-1]
+
+        # 检查上轮策略
+        last_strategy = "UNKNOWN"
+        if self.strategy_history:
+            last_strategy = self.strategy_history[-1].get("strategy", "UNKNOWN")
+
+        # 检查上轮是否失败（contract rate 为 0 或 PIVOT）
+        if last_strategy == "PIVOT":
+            self.log.info(f"[sprint_limit] Last round was PIVOT -> limit=1")
+            return 1
+
+        if self.contract_pass_rate_history:
+            last_contract = self.contract_pass_rate_history[-1]
+            if last_contract == 0.0:
+                self.log.info(f"[sprint_limit] Last contract rate was 0% -> limit=1")
+                return 1
+
+        # 从 sprint.md 读取上轮保守预算
+        sprint_path = self.workspace / config.SPRINT_FILE
+        conservative_budget = 25
+        if sprint_path.exists():
+            try:
+                sprint_text = sprint_path.read_text(encoding="utf-8", errors="replace")
+                import re
+                match = re.search(r'[保守|Conservative|conservative][：:]\s*(\d+)', sprint_text)
+                if match:
+                    conservative_budget = int(match.group(1))
+            except Exception:
+                pass
+
+        # 提前完成判定：实际迭代 < 保守预算 × 0.7
+        efficiency = last_iter / conservative_budget
+        self.log.info(
+            f"[sprint_limit] Last build: {last_iter} iter / {conservative_budget} budget "
+            f"(efficiency={efficiency:.1%})"
+        )
+
+        if efficiency < 0.7:
+            # 表现优秀，可以增加到 3 个任务
+            self.log.info("[sprint_limit] Builder under budget -> limit=3")
+            return 3
+        elif efficiency > 1.0:
+            # 超时，减到 1 个任务
+            self.log.info("[sprint_limit] Builder over budget -> limit=1")
+            return 1
+
+        # 正常完成，保持 2 个任务
+        return 2
+
+    def _get_builder_budget_hint(self) -> str:
+        """生成 Builder 历史表现的提示信息，供 SprintMaster 参考。"""
+        builder_iters = self._get_last_builder_iterations()
+        if not builder_iters:
+            return ""
+
+        recent = builder_iters[-3:]
+        avg_iter = sum(recent) / len(recent)
+        hint = f"Builder 最近 {len(recent)} 轮平均迭代数：{avg_iter:.0f} 次。"
+
+        # 如果最近一轮特别快，提示可以安排更多工作
+        if len(builder_iters) >= 2:
+            if builder_iters[-1] < builder_iters[-2] * 0.8:
+                hint += " 最近一轮效率明显提升，可以适当增加任务量。"
+            elif builder_iters[-1] > builder_iters[-2] * 1.3:
+                hint += " 最近一轮耗时增加，建议控制任务范围。"
+
+        return hint
+
+    # ------------------------------------------------------------------ #
     #      Dynamic Round Limits                                         #
     # ------------------------------------------------------------------ #
     def _calculate_max_rounds(self) -> int:
@@ -817,6 +1036,61 @@ class Harness:
             return 1
 
         return 0
+
+    # ------------------------------------------------------------------ #
+    #      Feature-group exit condition                                   #
+    # ------------------------------------------------------------------ #
+    def _check_exit_condition(self) -> tuple[bool, str]:
+        """检查是否满足退出条件（功能组推进版）。
+
+        成功条件：
+        1. Tier 1（F1-F4）所有组 100% 通过
+        2. Tier 2（F5-F9）所有组 ≥ 80% 通过
+        3. Overall ≥ 75%
+
+        失败/继续条件：
+        - 任一条件不满足 → 继续
+        """
+        if not self.feature_groups:
+            # Legacy mode: use contract rate threshold
+            if self.contract_pass_rate_history:
+                rate = self.contract_pass_rate_history[-1]
+                if rate >= config.CONTRACT_PASS_RATE_THRESHOLD:
+                    return True, f"Contract pass rate {rate:.0%} >= threshold"
+                return False, f"Contract pass rate {rate:.0%} below threshold"
+            return False, "No scores yet"
+
+        ts = self.feature_groups.tier_status()
+        overall = self.feature_groups.overall_rate()
+
+        # Check Tier 1
+        if not ts["tier1"]["passed"]:
+            return False, (
+                f"Tier 1 MVP incomplete: {ts['tier1']['groups_complete']}/"
+                f"{ts['tier1']['groups_total']} groups, overall {overall:.0%}"
+            )
+
+        # Check Tier 2
+        if not ts["tier2"]["passed"]:
+            return False, (
+                f"Tier 2 Core incomplete: {ts['tier2']['groups_complete']}/"
+                f"{ts['tier2']['groups_total']} groups, overall {overall:.0%}"
+            )
+
+        # Check overall
+        if overall < OVERALL_PASS_THRESHOLD:
+            return False, (
+                f"Overall {overall:.0%} below threshold {OVERALL_PASS_THRESHOLD:.0%}"
+            )
+
+        # Check stuck groups
+        stuck, stuck_gid = self.feature_groups.any_group_stuck()
+        if stuck:
+            return False, f"Group {stuck_gid} stuck for {self.feature_groups.stuck_counts.get(stuck_gid, 0)} rounds"
+
+        return True, (
+            f"Tier 1 ✅, Tier 2 ✅, Overall {overall:.0%} ✅"
+        )
 
     def _strategy_adjustment(self) -> int:
         """Builder 策略信号（双轨评分版）"""

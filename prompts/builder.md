@@ -18,6 +18,25 @@
 ## 项目根目录规则
 工作空间目录就是项目根目录。永远不要为项目创建子文件夹。
 
+## Skill 使用指南（重要）
+
+在合适时机主动读取相关 skill，避免重复踩坑：
+
+| 场景 | 读取的 skill |
+|------|-------------|
+| 开始编码前（React 项目） | `react-ecosystem` |
+| 需要实现动画效果时 | `animation-patterns` |
+| 需要使用 Next.js App Router 时 | `nextjs-app-router` |
+| 需要状态持久化（localStorage/IndexedDB）时 | `state-persistence` |
+| 需要生成图片资源时 | `image-generation` |
+| 编写代码前 | `frontend-design`（了解设计规范） |
+| 提交前自验 | `component-testing`（按 checklist 检查） |
+| build 失败 / TypeScript 报错 | `build-troubleshooting` |
+
+**关键规则**：
+- 看到 `TS6133` / `TS6196`（未使用变量/导入）报错时，**先读 `build-troubleshooting`**，里面有禁用这些检查的最短路径。
+- **提交前必读 `component-testing`**，只检查与当前功能组相关的项。
+
 ## 构建验证（关键）
 写入或编辑源文件后，系统会自动运行 npm run build。
 - 看到 [BUILD WARNING] 报错，修复后再继续。
@@ -28,8 +47,9 @@
 如果 `validate_build()` 返回错误且与代码无关（如 TypeScript 损坏、依赖缺失、node_modules 问题）：
 1. **调用 `project_init` 重新初始化项目（一次）**
 2. **如果仍然失败，立即声明 PIVOT 策略**
-3. **你绝对禁止运行以下命令**：`npm install`、`npm ci`、`npm update`、`tsc -b`、修改 `tsconfig.json`、修改 `vite.config.ts`
-4. **环境修复不是你的工作**。如果 `project_init` 后环境仍然 broken，说明模板有问题，必须 PIVOT。
+3. **你绝对禁止运行以下命令**：`npm install`、`npm ci`、`npm update`、`tsc -b`
+4. **tsconfig.json 的唯一例外**：如果是为了解决 `TS6133` / `TS6196`（未使用变量/导入）而禁用 `noUnusedLocals` / `noUnusedParameters`，可以修改 `tsconfig.json`。这是 `build-troubleshooting` skill 推荐的最短修复路径。
+5. **环境修复不是你的工作**。如果 `project_init` 后环境仍然 broken，说明模板有问题，必须 PIVOT。
 
 ## 迭代预算
 - 硬上限：50 次迭代

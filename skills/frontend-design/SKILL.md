@@ -121,7 +121,9 @@ letter-spacing: -0.01em; /* headings only */
 
 ## Part 3 — Scoring Rubrics (for Evaluator)
 
-Use these rubrics to assign scores to each dimension. Be a **skeptical QA**, not a lenient reviewer. Default-looking AI output scores 4-5, not 7-8.
+> ⚠️ **Architecture Note**: This system uses Functional Group Phase Execution. The Evaluator (Judge) outputs `GROUP_PASS_RATE` and `OVERALL_PASS_RATE`, not per-dimension scores. The rubrics below serve as reference criteria for evaluating contract criteria — use them to decide PASS/FAIL on each individual criterion, then compute the group pass rate.
+
+Use these rubrics to evaluate criteria within the current functional group. Be a **skeptical QA**, not a lenient reviewer.
 
 ---
 
@@ -209,16 +211,23 @@ Use these rubrics to assign scores to each dimension. Be a **skeptical QA**, not
 
 ## Scoring Summary Template
 
-When writing feedback.md, always use this format for the score summary:
+When writing feedback.md, use this format:
 
 ```
-SCORE: X/10
+GROUP_PASS_RATE: XX% (X/Y criteria in current group)
+OVERALL_PASS_RATE: XX% (X/Y total criteria)
 
-Design Quality: X/10  [PASS/FAIL if below threshold]
-Originality:    X/10  [PASS/FAIL if below threshold]
-Craft:          X/10  [PASS/FAIL if below threshold]
-Functionality:  X/10  [PASS/FAIL if below threshold]
+## Current Group Results
+- Criterion [ID]: [PASS/FAIL] — brief note
+- Criterion [ID]: [PASS/FAIL] — brief note
+...
+
+## Notes
+- List any blockers or significant issues found
+- Note if Reviewer marked INCOMPLETE (this caps group rate to 30%)
 ```
 
-A sprint FAILS if ANY dimension is below its threshold, regardless of total score.
-Hard thresholds: Functionality ≥ 5 | Design Quality ≥ 4 | Originality ≥ 3 | Craft ≥ 3
+The Harness checks tiered exit conditions:
+- Tier 1 (F1–F4): Must be 100%
+- Tier 2 (F5–F9): Must be ≥ 80%
+- Overall: Must be ≥ 75%
