@@ -17,7 +17,7 @@ from prompts import (
 )
 from tools_impl import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
 from harness.build import build_build_task
-from harness.eval import parse_pass_rates
+from harness.eval import parse_pass_rates, parse_skip_rate, compute_actual_contract_rate
 from harness.git import GitManager
 from harness.logging import setup_file_logging, log_round_stats, log_final_stats
 from harness.sprint import plan_sprint_master
@@ -302,6 +302,15 @@ class Harness:
         if strategy['strategy'] == 'PIVOT' and strategy.get('new_direction'):
             self.log.info(f"  New direction: {strategy['new_direction']}")
 
+        # FIX: Force restart dev server to ensure Builder's code changes are loaded.
+        # Next.js Turbopack may not hot-reload files written by Python subprocess
+        # (especially new files or files modified in a previous round). Killing the
+        # dev server before validation forces a clean start from the latest source.
+        from tools_impl import _kill_dev_server
+        self.log.info("[dev_server] Stopping existing dev server before validation...")
+        _kill_dev_server()
+        time.sleep(2)  # Wait for port release
+
         # ===== Pipeline Phase 2: 验证 + 提交 =====
         self.log.info("[pipeline] Phase 2 — Validation & commit")
         runner = PipelineRunner(self.workspace, self.event_bus)
@@ -441,8 +450,45 @@ class Harness:
             f"Limit: 15 iterations max."
         )
         review_result, review_usage = self.reviewer.run_with_stats(review_task)
+
+        # FIX: Detect incomplete Reviewer reports and protect against Judge over-scoring.
+        # If the Reviewer hit max iterations, its report may be partial. We mark it clearly
+        # and cap the contract rate to prevent false-high scores.
+        reviewer_status = "success"
+        if "[REVIEWER STATUS: INCOMPLETE" in review_result:
+            self.log.warning(
+                f"[reviewer] Round {round_num} review is INCOMPLETE (max iterations). "
+                f"Capping contract rate to prevent over-scoring."
+            )
+            reviewer_status = "incomplete"
+            # Prepend a clear header so Judge cannot miss the incomplete status
+            review_result = (
+                f"# ⚠️ REVIEWER REPORT — STATUS: INCOMPLETE (Round {round_num})\n\n"
+                f"**The Reviewer hit the iteration limit before completing all tests.**\n\n"
+                f"**RULES FOR JUDGE:**\n"
+                f"1. Only criteria EXPLICITLY tested in the partial report below may be scored.\n"
+                f"2. All other criteria MUST be marked FAIL (not SKIP).\n"
+                f"3. CONTRACT_PASS_RATE must not exceed 30% when the Reviewer report is incomplete.\n"
+                f"4. If no browser tests were completed, CONTRACT_PASS_RATE = 0%.\n\n"
+                f"---\n\n"
+                f"{review_result}"
+            )
+        elif review_result.startswith("[error]"):
+            self.log.error(f"[reviewer] Round {round_num} review failed: {review_result[:200]}")
+            reviewer_status = "error"
+            # Construct a minimal failure report so Judge has something to read
+            review_result = (
+                f"# REVIEWER REPORT — STATUS: FAILED (Round {round_num})\n\n"
+                f"**The Reviewer encountered an error and produced no test results.**\n\n"
+                f"**RULES FOR JUDGE:**\n"
+                f"1. No browser tests were performed.\n"
+                f"2. All criteria MUST be marked FAIL.\n"
+                f"3. CONTRACT_PASS_RATE = 0%.\n\n"
+                f"Original error: {review_result}\n"
+            )
+
         self.eval_cache.save_round(round_num, review_result)
-        self.dashboard.end_agent("success")
+        self.dashboard.end_agent(reviewer_status)
 
         # Step 2: Judge
         self.log.info("Evaluate phase — Step 2: Judge (pass-rate scoring)")
@@ -480,6 +526,68 @@ class Harness:
             log.warning("Could not parse pass rates from judge feedback, defaulting to 0")
             sprint_rate = sprint_rate or 0.0
             contract_rate = contract_rate or 0.0
+
+        # ------------------------------------------------------------------ #
+        #  FIX: Enforce real contract denominator — Judge may shrink the
+        #  denominator by marking unimplemented criteria as SKIP, inflating
+        #  the reported rate. We re-compute using the true total from
+        #  contract.md and treat missing / excess-SKIP items as FAIL.
+        # ------------------------------------------------------------------ #
+        contract_path = self.workspace / config.CONTRACT_FILE
+        if contract_path.exists():
+            contract_text = contract_path.read_text(encoding="utf-8", errors="replace")
+            review_text = self.eval_cache.get_full_report(round_num) or ""
+            true_rate, true_passed, true_failed, true_skipped, total_contract, overrides = (
+                compute_actual_contract_rate(eval_text, contract_text, review_text)
+            )
+            if total_contract > 0:
+                # If Judge's rate deviates significantly from true rate, override
+                judge_reported_total = true_passed + true_failed + true_skipped
+                if abs(contract_rate - true_rate) > 0.05 or judge_reported_total < total_contract:
+                    self.log.warning(
+                        f"[judge] Judge reported {contract_rate:.0%} ({judge_reported_total} criteria), "
+                        f"but true rate over {total_contract} criteria is {true_rate:.0%}. "
+                        f"Using true rate."
+                    )
+                    contract_rate = true_rate
+                if overrides:
+                    for ov in overrides:
+                        self.log.warning(f"[judge] {ov}")
+        else:
+            self.log.warning("[judge] contract.md not found, cannot verify true denominator")
+
+        # FIX: Detect excessive SKIP ratio — secondary guard
+        skip_rate = parse_skip_rate(eval_text)
+        if skip_rate > 0.20 and contract_rate >= config.CONTRACT_PASS_RATE_THRESHOLD:
+            adjusted_contract = contract_rate * (1 - skip_rate)
+            self.log.warning(
+                f"[judge] Judge gave {contract_rate:.0%} contract but SKIP ratio is {skip_rate:.0%}. "
+                f"Adjusting contract rate to {adjusted_contract:.0%} to prevent premature termination."
+            )
+            contract_rate = adjusted_contract
+
+        # FIX: Cap scores when Reviewer report is incomplete or failed.
+        # This prevents Judge from giving high scores based on code presence alone
+        # when the Reviewer did not complete browser testing.
+        if reviewer_status == "incomplete":
+            capped_contract = min(contract_rate, 0.30)
+            capped_sprint = min(sprint_rate, 0.30)
+            if capped_contract < contract_rate or capped_sprint < sprint_rate:
+                self.log.warning(
+                    f"[judge] Judge gave {contract_rate:.0%} contract / {sprint_rate:.0%} sprint, "
+                    f"but Reviewer report was INCOMPLETE. Capping to "
+                    f"{capped_contract:.0%} / {capped_sprint:.0%}."
+                )
+            contract_rate = capped_contract
+            sprint_rate = capped_sprint
+        elif reviewer_status == "error":
+            if contract_rate > 0 or sprint_rate > 0:
+                self.log.warning(
+                    f"[judge] Judge gave {contract_rate:.0%} contract / {sprint_rate:.0%} sprint, "
+                    f"but Reviewer FAILED. Forcing to 0%."
+                )
+            contract_rate = 0.0
+            sprint_rate = 0.0
 
         self.sprint_pass_rate_history.append(sprint_rate)
         self.contract_pass_rate_history.append(contract_rate)

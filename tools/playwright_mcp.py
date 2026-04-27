@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -41,6 +42,9 @@ def _wrap_script(script: str) -> str:
     - Scripts starting with 'return' keep the return statement.
     - Multi-line scripts are wrapped in braces.
     - Simple expressions get an automatic 'return'.
+    - Single-line scripts with statement-level syntax (var/let/const/function/
+      for/if/while/try/switch/class) are wrapped WITHOUT adding 'return',
+      because 'return var x = 1' is a syntax error.
     """
     s = script.strip()
 
@@ -66,8 +70,20 @@ def _wrap_script(script: str) -> str:
             return f"async () => {{ {s} }}"
         return f"() => {{ {s} }}"
 
-    # Multi-line or complex script → wrap in braces without adding return
+    # Multi-line script → wrap in braces without adding return
     if "\n" in s:
+        if needs_async:
+            return f"async () => {{ {s} }}"
+        return f"() => {{ {s} }}"
+
+    # Single-line script: check for statement-level keywords that would
+    # create a syntax error if we prepend 'return'.
+    # e.g. "var s = ...; return s.length" → "return var s = ..." is INVALID.
+    _STATEMENT_KEYWORDS = (
+        "var ", "let ", "const ", "function ", "if ", "for ", "while ",
+        "try ", "switch ", "class ", "do ", "with ", "throw ",
+    )
+    if any(s.startswith(kw) for kw in _STATEMENT_KEYWORDS):
         if needs_async:
             return f"async () => {{ {s} }}"
         return f"() => {{ {s} }}"
@@ -188,11 +204,36 @@ class PlaywrightMCPBridge:
                 "height": vp["height"],
             })
 
-            # 2. 导航
-            nav_result = await self._call_tool("browser_navigate", {"url": url})
+            # 2. 导航（带 cache-busting 防止浏览器缓存旧版本）
+            cache_bust_url = f"{url}{'&' if '?' in url else '?'}_t={int(time.time())}"
+            nav_result = await self._call_tool("browser_navigate", {"url": cache_bust_url})
             # 从 MCP 结果中提取标题
             title = self._extract_title(nav_result)
-            report_lines.append(f"Navigated to {url} — title: {title}")
+            report_lines.append(f"Navigated to {cache_bust_url} — title: {title}")
+
+            # 2.3 FIX: Clear browser caches to prevent stale content from previous tests
+            try:
+                await self._call_tool("browser_evaluate", {
+                    "function": "() => { try { caches.keys().then(ks => ks.forEach(k => caches.delete(k))); } catch(e) {} return 'cache_cleared'; }"
+                })
+            except Exception:
+                pass
+
+            # 2.5 FIX: Wait longer for Vite/React apps to fully compile and hydrate
+            # Vite HMR may need extra time after dev server restart
+            await asyncio.sleep(3)
+
+            # 2.6 FIX: Re-navigate to force fresh load (some headless browsers cache modules)
+            try:
+                await self._call_tool("browser_navigate", {"url": cache_bust_url})
+                await asyncio.sleep(2)
+                title2 = self._extract_title(await self._call_tool("browser_evaluate", {
+                    "function": "() => document.title"
+                }))
+                if title2:
+                    report_lines.append(f"Fresh load complete — title: {title2}")
+            except Exception as e:
+                report_lines.append(f"[warn] Fresh reload skipped: {e}")
 
             # 3. 执行 actions
             for action in (actions or []):
@@ -295,6 +336,8 @@ class PlaywrightMCPBridge:
                 nav_result = await self._call_tool("browser_navigate", {"url": url})
                 if "Error" in nav_result:
                     return f"[error] Navigation failed: {nav_result}"
+                # 等待页面 hydrate 完成（Next.js / React 应用需要）
+                await asyncio.sleep(2)
 
             # 执行脚本 — Playwright MCP 要求 function 是完整可序列化的函数
             wrapped = _wrap_script(script)

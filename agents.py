@@ -307,13 +307,33 @@ class Agent:
             run_log.write_jsonl(config.WORKSPACE)
         except Exception:
             pass
-        # FIX: Include strategy hint when max iterations reached so Harness can respond appropriately
+
+        # FIX: Return the last assistant message content as a partial report instead of
+        # a hardcoded error message. This preserves any browser test findings the Reviewer
+        # already gathered before hitting the iteration limit.
+        last_assistant_content = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                last_assistant_content = msg["content"]
+                break
+
+        if last_assistant_content:
+            return (
+                f"{last_assistant_content}\n\n"
+                f"---\n"
+                f"[REVIEWER STATUS: INCOMPLETE — Hit iteration limit ({max_iter}). "
+                f"The report above contains findings gathered before the limit was reached. "
+                f"Any criteria not explicitly tested above should be treated as NOT VERIFIED.]\n"
+                f"---",
+                usage,
+            )
+
         return (
             f"[error] Max iterations reached ({max_iter}). Stopping to preserve budget.\n\n"
             f"---\nSTRATEGY: REFINE\n"
             f"REASON: Hit iteration limit ({max_iter}). Need to simplify approach or split task.\n"
             f"---",
-            usage
+            usage,
         )
 
     def _check_context_lifecycle(self, messages: list[dict]) -> list[dict]:

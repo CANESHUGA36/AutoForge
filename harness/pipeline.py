@@ -53,9 +53,15 @@ class PipelineStage(ABC):
 
                 # 自动修复逻辑
                 if self.allow_auto_fix and not result.auto_fix_attempted:
+                    result.auto_fix_attempted = True
                     fix_result = self.auto_fix()
-                    if fix_result and fix_result.success:
-                        self._emit("stage_auto_fixed", fix_result.payload)
+                    if fix_result:
+                        fix_result.auto_fix_attempted = True
+                        if fix_result.success:
+                            self._emit("stage_auto_fixed", fix_result.payload)
+                            return fix_result
+                        # auto_fix 尝试了但失败了，返回 fix_result 让日志显示真正原因
+                        self._emit("stage_auto_fix_failed", {"message": fix_result.message})
                         return fix_result
 
             return result
@@ -111,9 +117,12 @@ class PipelineRunner:
                 log.info(f"[{stage.name}] Requested skip_remaining, halting pipeline")
                 break
 
-            # 如果阶段失败且没有自动修复
-            if not result.success and not result.auto_fix_attempted:
-                log.warning(f"[{stage.name}] Failed and no auto-fix, halting pipeline")
+            # 如果阶段失败（auto_fix 成功的情况已经被 execute() 处理，返回 success=True）
+            if not result.success:
+                if result.auto_fix_attempted:
+                    log.warning(f"[{stage.name}] Auto-fix attempted but failed, halting pipeline")
+                else:
+                    log.warning(f"[{stage.name}] Failed and no auto-fix, halting pipeline")
                 break
 
         return context

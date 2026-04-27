@@ -65,6 +65,40 @@ def parse_pass_rates(text: str) -> tuple[float | None, float | None]:
     return sprint_rate, contract_rate
 
 
+def parse_skip_rate(text: str) -> float:
+    """Parse skipped criteria count from evaluator feedback.
+
+    Returns SKIP ratio (0.0-1.0) based on:
+    - Passed Criteria section: count '- [x]' lines
+    - Failed Criteria section: count '- [ ]' lines  
+    - Skipped Criteria section: count '- [ ]' lines
+
+    Returns 0.0 if no criteria sections found.
+    """
+    # Extract sections
+    passed_section = re.search(
+        r'###\s*Passed Criteria.*?(?=###|\Z)',
+        text, re.IGNORECASE | re.DOTALL
+    )
+    failed_section = re.search(
+        r'###\s*Failed Criteria.*?(?=###|\Z)',
+        text, re.IGNORECASE | re.DOTALL
+    )
+    skipped_section = re.search(
+        r'###\s*Skipped Criteria.*?(?=###|\Z)',
+        text, re.IGNORECASE | re.DOTALL
+    )
+
+    passed = len(re.findall(r'^\s*-\s+\[x\]', passed_section.group(0) if passed_section else '', re.MULTILINE))
+    failed = len(re.findall(r'^\s*-\s+\[\s*\]', failed_section.group(0) if failed_section else '', re.MULTILINE))
+    skipped = len(re.findall(r'^\s*-\s+\[\s*\]', skipped_section.group(0) if skipped_section else '', re.MULTILINE))
+
+    total = passed + failed + skipped
+    if total == 0:
+        return 0.0
+    return skipped / total
+
+
 def parse_dimension_scores(text: str) -> dict:
     """Parse per-dimension scores from '### Dimension Name: X/10' headings."""
     _name_map = {
@@ -92,3 +126,215 @@ def check_dimension_thresholds(dim_scores: dict) -> list[str]:
         if score is not None and score < threshold:
             failed.append(f"{dim}={score:.1f} (threshold {threshold:.1f})")
     return failed
+
+
+# --------------------------------------------------------------------------- #
+#  Cross-validation: Reviewer FAIL vs Judge PASS
+# --------------------------------------------------------------------------- #
+
+_REVIEWER_FAIL_RE = re.compile(
+    r'([A-Z]\d+(?:\.\d+)?)[:\s].*?(?:❌|FAIL|NOT FOUND|NOT IMPLEMENTED|missing|absent)',
+    re.IGNORECASE,
+)
+
+
+def extract_reviewer_fails(review_text: str) -> set[str]:
+    """Extract criteria IDs that Reviewer explicitly marks as FAIL/missing.
+
+    Looks for patterns like:
+      - 'F3.1-F3.6: NOT IMPLEMENTED'
+      - 'C4: Preset names | ❌ FAIL'
+      - 'F3.1: Frequency bars — NOT IMPLEMENTED'
+    Returns a set of criteria IDs (e.g., {'F3.1', 'C4', 'D5'}).
+    """
+    fails: set[str] = set()
+    for line in review_text.splitlines():
+        # Check for explicit FAIL indicators in the line
+        if not re.search(r'❌|FAIL|NOT FOUND|NOT IMPLEMENTED|missing|absent', line, re.IGNORECASE):
+            continue
+        # Extract all criteria IDs from this line
+        ids = re.findall(r'\b([A-Z]\d+(?:\.\d+)?)\b', line)
+        fails.update(ids)
+    return fails
+
+
+def cross_validate_passes(
+    eval_text: str, review_text: str
+) -> tuple[int, list[str]]:
+    """Cross-check Judge's PASS items against Reviewer's FAIL items.
+
+    Returns (corrected_pass_count, list_of_overrides).
+    For each criteria that Judge marked PASS but Reviewer marked FAIL,
+    we count it as FAIL instead and record an override message.
+    """
+    reviewer_fails = extract_reviewer_fails(review_text)
+    if not reviewer_fails:
+        return None, []
+
+    # Find PASS items in Judge's feedback
+    pass_section = re.search(
+        r'###\s*Passed Criteria.*?(?=###|\Z)',
+        eval_text, re.IGNORECASE | re.DOTALL
+    )
+    pass_text = pass_section.group(0) if pass_section else eval_text
+
+    overrides: list[str] = []
+    corrected_pass = 0
+
+    for line in pass_text.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped.startswith('- [x]'):
+            continue
+
+        ids = re.findall(r'\b([A-Z]\d+(?:\.\d+)?)\b', line_stripped)
+        count = _expand_criteria_range(line_stripped)
+
+        # Check if any ID in this line was marked FAIL by Reviewer
+        fail_ids = [i for i in ids if i in reviewer_fails]
+        if fail_ids:
+            overrides.append(
+                f"{', '.join(fail_ids)}: Judge PASS overridden to FAIL "
+                f"(Reviewer found NOT IMPLEMENTED/NOT FOUND)"
+            )
+        else:
+            corrected_pass += count
+
+    return corrected_pass, overrides
+
+
+# --------------------------------------------------------------------------- #
+#  Contract criteria counting — real denominator enforcement
+# --------------------------------------------------------------------------- #
+
+_CONTRACT_CRITERIA_RE = re.compile(
+    r'^\s*-\s+\[\s*\]\s+\*\*([A-Z]\d+(?:\.\d+)?)\*\*',
+    re.MULTILINE,
+)
+
+
+def count_contract_criteria(contract_text: str) -> int:
+    """Count total acceptance criteria in contract.md.
+
+    Matches lines like:
+      - [ ] **F1.1**: ...
+      - [ ] **D1**: ...
+      - [ ] **T1**: ...
+    Returns the total number of criteria found.
+    """
+    matches = _CONTRACT_CRITERIA_RE.findall(contract_text)
+    return len(matches)
+
+
+_JUDGE_PASS_RE = re.compile(r'^\s*-\s+\[x\]', re.MULTILINE)
+_JUDGE_SKIP_RE = re.compile(r'^\s*-\s+\[\s*\].*SKIP', re.MULTILINE | re.IGNORECASE)
+# Match range patterns like F3.1-F3.6 or F10.1-F10.5
+_CRITERIA_RANGE_RE = re.compile(r'([A-Z])(\d+)\.(\d+)\s*[-~–—]\s*(?:\1)?(\d+)\.(\d+)')
+
+
+def _expand_criteria_range(line: str) -> int:
+    """Expand a criteria range like 'F3.1-F3.6' into item count.
+    Returns 1 if no range found.
+    """
+    match = _CRITERIA_RANGE_RE.search(line)
+    if not match:
+        return 1
+    prefix, start_major, start_minor, end_major, end_minor = match.groups()
+    # Count items in range (e.g., F3.1-F3.6 = 6 items)
+    count = (int(end_major) - int(start_major)) * 100 + (int(end_minor) - int(start_minor)) + 1
+    return max(1, count)
+
+
+def count_judge_criteria(eval_text: str) -> tuple[int, int, int]:
+    """Count PASS / FAIL / SKIP criteria from Judge's feedback text.
+
+    Returns (passed, failed, skipped).
+    Handles range notation like 'F3.1-F3.6' by expanding to individual criteria count.
+    """
+    # Find the Contract Evaluation section
+    contract_section = re.search(
+        r'##\s*Contract Evaluation.*?(?=##\s*(?:Sprint|Strength|Issue|Action|Scoring|Round-Over-Round)|\Z)',
+        eval_text, re.IGNORECASE | re.DOTALL
+    )
+    text_to_search = contract_section.group(0) if contract_section else eval_text
+
+    passed = 0
+    skipped = 0
+    failed = 0
+
+    for line in text_to_search.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped.startswith('- ['):
+            continue
+
+        count = _expand_criteria_range(line_stripped)
+
+        if '[x]' in line_stripped:
+            passed += count
+        elif 'SKIP' in line_stripped.upper():
+            skipped += count
+        elif '[ ]' in line_stripped:
+            failed += count
+
+    return passed, failed, skipped
+
+
+def compute_actual_contract_rate(
+    eval_text: str, contract_text: str, review_text: str = ""
+) -> tuple[float, int, int, int, int, list[str]]:
+    """Compute the true CONTRACT_PASS_RATE using the real contract denominator.
+
+    Returns (rate, passed, failed, skipped, total_contract, overrides).
+
+    Logic:
+    1. total_contract = count of all criteria in contract.md (real denominator)
+    2. From Judge's feedback, count how many criteria Judge actually evaluated
+    3. Cross-validate: if Reviewer marked FAIL but Judge marked PASS, override to FAIL
+    4. If Judge evaluated fewer than total_contract, the missing ones are treated as FAIL
+    5. If SKIP ratio > 20%, excess SKIP items are treated as FAIL
+    6. Final rate = passed / total_contract
+    """
+    total_contract = count_contract_criteria(contract_text)
+    judge_passed, judge_failed, judge_skipped = count_judge_criteria(eval_text)
+
+    if total_contract == 0:
+        log.warning("No criteria found in contract.md, cannot compute real rate")
+        return 0.0, 0, 0, 0, 0, []
+
+    # Cross-validation: Reviewer FAIL overrides Judge PASS
+    overrides: list[str] = []
+    if review_text:
+        corrected_pass, overrides = cross_validate_passes(eval_text, review_text)
+        if corrected_pass is not None and corrected_pass < judge_passed:
+            log.warning(
+                f"[contract_rate] Cross-validation: {judge_passed - corrected_pass} "
+                f"Judge PASS items overridden to FAIL based on Reviewer report"
+            )
+            judge_failed += (judge_passed - corrected_pass)
+            judge_passed = corrected_pass
+
+    # Items Judge explicitly evaluated
+    judge_evaluated = judge_passed + judge_failed + judge_skipped
+    # Items Judge missed entirely (not in PASS/FAIL/SKIP sections)
+    judge_missed = max(0, total_contract - judge_evaluated)
+
+    # Enforce 20% SKIP limit: excess SKIP becomes FAIL
+    max_skip = int(total_contract * 0.20)
+    excess_skip = max(0, judge_skipped - max_skip)
+    effective_skipped = judge_skipped - excess_skip
+    effective_failed = judge_failed + excess_skip + judge_missed
+
+    # Compute true rate: passed / total_contract
+    true_passed = judge_passed
+    true_failed = effective_failed + effective_skipped  # SKIP counts as FAIL for rate calc
+
+    rate = true_passed / total_contract if total_contract > 0 else 0.0
+
+    log.info(
+        f"[contract_rate] Judge: {judge_passed}P/{judge_failed}F/{judge_skipped}S "
+        f"(evaluated {judge_evaluated}/{total_contract}), "
+        f"missed={judge_missed}, excess_skip={excess_skip}, "
+        f"overrides={len(overrides)} "
+        f"-> true rate={rate:.1%} ({true_passed}/{total_contract})"
+    )
+
+    return rate, true_passed, true_failed, effective_skipped, total_contract, overrides

@@ -12,10 +12,15 @@
    - 你不亲自验证 DOM 或截图
    - 你只基于 Reviewer 提供的测试证据做判断
 
+3. **禁止用 SKIP 掩盖未实现功能**
+   - contract.md 中所有标准都是强制验收标准，**不存在"不在本轮 sprint 范围内"的概念**
+   - 未实现的功能 = FAIL，不能 SKIP
+   - 只有 contract.md 中**明确标注为 [OPTIONAL]** 的标准才可 SKIP
+
 ## 输入材料
 1. Reviewer 的统一审查报告（最高优先级证据）
 2. sprint.md（本轮目标）
-3. contract.md（全局验收标准）
+3. contract.md（全局验收标准，包含 ALL 142 项标准）
 4. 历史 feedback.md（验证问题修复情况）
 
 ## 你的工作
@@ -27,13 +32,32 @@
 
 计算：SPRINT_PASS_RATE = passed_tasks / total_tasks
 
-### 第二步：评估 Contract 完成度
-读取 contract.md 中的验收标准，逐条判断 PASS/FAIL：
-- **PASS**：Reviewer 证实该标准已满足
-- **FAIL**：Reviewer 证实该标准未满足，或对应功能未实现/无法工作
-- **SKIP**：仅当该功能明确不在本轮 sprint 范围内且 Reviewer 未测试时才可 SKIP
+### 第二步：评估 Contract 完成度（严格模式）
 
-计算：CONTRACT_PASS_RATE = passed_criteria / total_criteria  [SKIP 不超过 20%]
+**分母规则（强制）**：
+- total_criteria = contract.md 中所有标准总数（约 142 项）
+- **不允许缩小分母** — 必须基于全部标准计算
+- 系统会在你输出后重新核算，如果你缩小的分母与真实分母不符，评分将被强制修正
+
+**评分规则**：
+- **PASS**：Reviewer 明确证实该标准已满足
+- **FAIL**：以下任一情况必须标记 FAIL：
+  - Reviewer 证实该标准未满足
+  - 对应功能未实现/无法工作
+  - 代码中不存在对应实现
+  - Reviewer 的浏览器测试未找到该功能
+- **SKIP**：仅限 contract.md 中**明确标注 [OPTIONAL]** 的标准，且比例不得超过 20%
+
+**绝对禁止**：
+- ❌ 以"不在本轮 sprint 范围内"为由 SKIP
+- ❌ 以"Phase 2/3 功能"为由 SKIP
+- ❌ 以"未来实现"为由 SKIP
+- ❌ 未实现的功能标记为 PASS
+
+**计算**：CONTRACT_PASS_RATE = passed_criteria / total_criteria_in_contract
+- total_criteria_in_contract = contract.md 中所有 `- [ ] **Xn.n**` 格式的标准总数
+- SKIP 计入 FAIL（即 SKIP 项既不算 PASS 也不算在分母中扣除）
+- 最终通过率 = PASS数 / 总标准数
 
 ### 第三步：输出 feedback.md
 

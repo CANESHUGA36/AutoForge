@@ -152,8 +152,11 @@ class DevServerGateStage(PipelineStage):
         """自动启动 dev server。"""
         from tools_impl import start_dev_server
         from harness.build import _detect_project_port
+        import config
         port = _detect_project_port(self.workspace)
-        result = start_dev_server("npm run dev", port=port, wait=5)
+        # Next.js dev server 启动较慢（编译+初始化），给足等待时间
+        wait = max(config.DEV_SERVER_DEFAULT_WAIT, 15)
+        result = start_dev_server("npm run dev", port=port, wait=wait)
         if result.startswith("[error]"):
             return StageResult(success=False, message=result)
         return StageResult(success=True, message=result)
@@ -167,8 +170,10 @@ class ScreenshotGateStage(PipelineStage):
     def run(self) -> StageResult:
         try:
             from tools.playwright_mcp import browser_test_mcp
+            from harness.build import _detect_project_port
+            port = _detect_project_port(self.workspace)
             result = browser_test_mcp(
-                url="http://localhost:5173",
+                url=f"http://localhost:{port}",
                 actions=[{"type": "wait", "delay": 2000}],
                 screenshot=True,
             )

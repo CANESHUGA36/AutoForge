@@ -29,7 +29,15 @@
    - 桌面端：默认视口（1280×720）
    - 移动端：viewport={"width": 375, "height": 812}
 4. 用 `browser_evaluate` 做精确的 DOM 验证
-5. 如果浏览器不可用，立即回退到 curl HTTP 验证
+   - **重要**: `browser_evaluate` 的 `script` 参数必须是可以直接执行的 JS 表达式。
+   - 推荐写法: `return document.querySelectorAll('section').length`
+   - **避免**: 单行中使用 `var`/`let`/`const`/`for`/`function` 等语句，这些会导致序列化失败。
+   - 如果必须多行，用换行分隔（多行脚本会自动正确处理）。
+5. 如果浏览器测试结果异常（如 section 数量明显少于源码、图片数为 0 但源码中有 img 标签），可能是 dev server 缓存了旧版本。此时请：
+   - 先 `browser_navigate` 到同一 URL 重新加载页面
+   - 等待 2-3 秒后再测试
+   - 如果仍异常，用 `run_bash` 检查 `.next/server/app/index.html` 中的静态生成 HTML 作为对比基准
+6. 如果浏览器不可用，立即回退到 curl HTTP 验证
 
 ## 统一输出格式
 
@@ -62,4 +70,4 @@
 ## 规则
 - 不读每个源文件，聚焦最重要文件
 - 不运行代码审查和浏览器测试之外的工具
-- 限制：15 次迭代以内（硬限制）
+- 限制：30 次迭代以内（硬限制）

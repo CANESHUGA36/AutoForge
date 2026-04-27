@@ -37,7 +37,9 @@ class TestPreBuildGateStage:
             mock_bash.return_value = "[error] npm install failed"
             result = stage.execute()
         assert result.success is False
-        assert "node_modules" in result.message
+        # execute() 现在返回 auto_fix 的结果，让用户看到真正失败原因
+        assert "npm install failed" in result.message
+        assert result.auto_fix_attempted is True
 
     def test_missing_build_tools(self, mock_workspace):
         (mock_workspace / "package.json").write_text('{"name": "test"}')
@@ -49,7 +51,9 @@ class TestPreBuildGateStage:
             mock_bash.return_value = "[error] npm install failed"
             result = stage.execute()
         assert result.success is False
-        assert "build tools" in result.message
+        # execute() 现在返回 auto_fix 的结果，让用户看到真正失败原因
+        assert "npm install failed" in result.message
+        assert result.auto_fix_attempted is True
 
     def test_success_with_vite(self, mock_workspace):
         (mock_workspace / "package.json").write_text('{"name": "test"}')
@@ -109,11 +113,15 @@ class TestPreBuildGateStage:
         (mock_workspace / "node_modules" / ".bin" / "vite").write_text("")
         bus = EventBus(mock_workspace)
         stage = PreBuildGateStage(mock_workspace, bus, 1)
-        with patch("tools_impl.validate_build") as mock_build:
+        with patch("tools_impl.validate_build") as mock_build, \
+             patch("tools_impl.run_bash") as mock_bash:
+            mock_bash.return_value = "added 42 packages"
             mock_build.return_value = "[BUILD WARNING] TypeScript compilation failed"
             result = stage.execute()
         assert result.success is False
-        assert "Build verification failed" in result.message
+        # execute() 现在返回 auto_fix 的结果
+        assert "build still fails" in result.message
+        assert result.auto_fix_attempted is True
 
 
 # --------------------------------------------------------------------------- #

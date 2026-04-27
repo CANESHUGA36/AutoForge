@@ -70,7 +70,7 @@ AGENT_ITERATION_LIMITS = {
     "architect": int(os.environ.get("MAX_ITERATIONS_ARCHITECT", "30")),
     "sprint_master": int(os.environ.get("MAX_ITERATIONS_SPRINT_MASTER", "15")),
     "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "50")),
-    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "15")),
+    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "30")),
     "judge": int(os.environ.get("MAX_ITERATIONS_JUDGE", "10")),
 }
 

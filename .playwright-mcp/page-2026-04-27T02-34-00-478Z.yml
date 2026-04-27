@@ -1,0 +1,425 @@
+- main [ref=e2]:
+  - banner [ref=e3]:
+    - navigation "Main navigation" [ref=e4]:
+      - generic [ref=e5] [cursor=pointer]:
+        - generic [ref=e7]: EC
+        - generic [ref=e8]: Eclipse Chronicles
+      - generic [ref=e9]:
+        - button "Navigate to Story section" [ref=e10]: Story
+        - button "Navigate to Characters section" [ref=e11]: Characters
+        - button "Navigate to World section" [ref=e12]: World
+        - button "Navigate to Combat section" [ref=e13]: Combat
+        - button "Navigate to Features section" [ref=e14]: Features
+        - button "Navigate to Pre-Order section" [ref=e15]: Pre-Order
+  - img "Twilight cityscape with dramatic eclipse" [ref=e17]
+  - generic [ref=e25]:
+    - generic [ref=e26]:
+      - generic [ref=e27]: A New Legend Rises
+      - heading "Eclipse Chronicles" [level=1] [ref=e28]
+      - generic [ref=e29]: Twilight Awakening
+    - paragraph [ref=e31]
+    - generic [ref=e33]:
+      - button "Watch the game trailer" [ref=e34] [cursor=pointer]:
+        - img [ref=e35]
+        - text: Watch Trailer
+      - button "Learn more about the game" [ref=e37] [cursor=pointer]:
+        - generic [ref=e38]: Learn More
+        - img [ref=e39]
+  - button "Scroll to learn more" [ref=e42] [cursor=pointer]:
+    - generic [ref=e43]: Scroll
+    - img [ref=e45]
+  - generic [ref=e50]:
+    - heading "The Twilight Saga Begins" [level=2] [ref=e52]
+    - generic [ref=e54]:
+      - img "The grand hallway of Starshade Academy, where destiny awaits" [ref=e57]
+      - generic [ref=e60]:
+        - paragraph [ref=e61]: Aiden Vale, a seemingly ordinary seventeen-year-old, never suspected that the dreams plaguing his sleepless nights were in fact echoes of another world bleeding into his own. When he receives an invitation to Starshade Academy, a prestigious institution hidden in plain sight within the Twilight District, his life takes an irrevocable turn.
+        - paragraph [ref=e62]: "Within these hallowed halls, Aiden discovers that reality itself is split between two intertwined dimensions: the Waking World he has always known, and the Twilight Realm, a shadowed reflection where ancient powers stir. Students like himself possess the rare gift to traverse both worlds, wielding the mystical energy known as Eclipse Force."
+        - paragraph [ref=e63]: Yet peace is fleeting. A malevolent entity known only as The Umbral Sovereign seeks to shatter the barrier between worlds, consuming both realities in eternal darkness. As the midnight hour approaches and the next great eclipse looms on the horizon, Aiden must forge alliances with unlikely companions, master his burgeoning powers, and uncover the truth about his own mysterious origins—before the world he knows is forever consumed by shadow.
+        - paragraph [ref=e64]: Duality defines us. What we choose in the twilight hours shapes who we become when the sun rises...
+        - button "Begin your journey and discover your fate" [ref=e66] [cursor=pointer]:
+          - generic [ref=e67]: Discover Your Fate
+          - img [ref=e68]
+  - generic [ref=e74]:
+    - generic [ref=e75]:
+      - heading "Meet the Characters" [level=2] [ref=e76]
+      - paragraph [ref=e77]: Forge alliances with unique individuals as you navigate the twilight between worlds
+    - generic [ref=e79]:
+      - generic [ref=e81]:
+        - generic [ref=e84]:
+          - img "Aiden Vale, The Protagonist" [ref=e87]
+          - generic [ref=e88]:
+            - generic [ref=e89]:
+              - generic [ref=e90]: The Protagonist
+              - heading "Aiden Vale" [level=3] [ref=e91]
+            - paragraph [ref=e92]: A seventeen-year-old with a mysterious past, Aiden discovers he can traverse between two parallel worlds. Gifted with the rare Eclipse Force ability, he must master his powers to save both reality from the encroaching darkness. His journey begins when he's summoned to Starshade Academy, where his true destiny awaits among the shadows and secrets of the Twilight Realm.
+        - generic [ref=e95]:
+          - img "Kaito, Fierce Leader" [ref=e98]
+          - generic [ref=e99]:
+            - generic [ref=e100]:
+              - generic [ref=e101]: Fierce Leader
+              - heading "Kaito" [level=3] [ref=e102]
+            - paragraph [ref=e103]: The captain of Starshade Academy's eliteguard, Kaito commands respect through both his formidable combat skills and unwavering loyalty. His silver hair marks him as a veteran of countless battles against the shadow creatures that emerge from The Void. Though his stern exterior may intimidate newcomers, those who earn his trust find a steadfast ally who will fight to the death to protect his companions.
+        - generic [ref=e106]:
+          - img "Yuki, Studious Sage" [ref=e109]
+          - generic [ref=e110]:
+            - generic [ref=e111]:
+              - generic [ref=e112]: Studious Sage
+              - heading "Yuki" [level=3] [ref=e113]
+            - paragraph [ref=e114]: A brilliant scholar who has devoted her life to understanding the mysteries of the Twilight Realm, Yuki possesses encyclopedic knowledge of Eclipse Force theory and dimensional mechanics. Her calm demeanor masks an insatiable curiosity that drives her research. Behind her elegant glasses lies sharp intuition, making her invaluable for deciphering ancient texts and developing new combat strategies against the Umbral Sovereign's forces.
+        - generic [ref=e117]:
+          - img "Ren, Energetic Rebel" [ref=e120]
+          - generic [ref=e121]:
+            - generic [ref=e122]:
+              - generic [ref=e123]: Energetic Rebel
+              - heading "Ren" [level=3] [ref=e124]
+            - paragraph [ref=e125]: Defying every rule at Starshade Academy, Ren brings chaotic energy and unorthodox tactics to any situation. His street-fighting style and electric-powered abilities make him unpredictable in battle. What he lacks in discipline he makes up for in creativity, often finding solutions where traditional approaches fail. Despite his rebellious reputation, his heart beats for justice, and he'll risk everything for those he calls friends.
+        - generic [ref=e128]:
+          - img "Akira, Mysterious Mentor" [ref=e131]
+          - generic [ref=e132]:
+            - generic [ref=e133]:
+              - generic [ref=e134]: Mysterious Mentor
+              - heading "Akira" [level=3] [ref=e135]
+            - paragraph [ref=e136]: An enigmatic figure who appears when least expected, Akira walks between both worlds with an air of ancient wisdom. Few know his true origins, but his mastery of Eclipse Force transcends ordinary understanding. He guides Aiden through trials both physical and spiritual, revealing secrets hidden for generations. In his golden eyes lies the weight of countless lifetimes spent protecting the fragile boundary between worlds.
+      - generic [ref=e137]:
+        - button "Go to Aiden Vale's card" [ref=e138]
+        - button "Go to Kaito's card" [ref=e139]
+        - button "Go to Yuki's card" [ref=e140]
+        - button "Go to Ren's card" [ref=e141]
+        - button "Go to Akira's card" [ref=e142]
+  - generic [ref=e146]:
+    - generic [ref=e147]:
+      - heading "Explore the World" [level=2] [ref=e148]
+      - paragraph [ref=e149]: Discover the four realms that shape the fate of all who walk between worlds
+    - generic [ref=e151]:
+      - img "Map showing the four key locations of Eclipse Chronicles" [ref=e154]
+      - generic [ref=e155]:
+        - generic [ref=e156]:
+          - generic [ref=e157]: 🏛️
+          - heading "Starshade Academy" [level=3] [ref=e158]
+          - paragraph [ref=e159]: Hidden within the Twilight District, Starshade Academy serves as both a prestigious educational institution and a training ground for those who wield Eclipse Force. Its grand halls echo with centuries of accumulated wisdom, while secret passages lead to training arenas where students master combat techniques. The academy's protective wards keep the shadow creatures at bay, creating a sanctuary of knowledge in a world threatened by darkness.
+        - generic [ref=e160]:
+          - generic [ref=e161]: 🌀
+          - heading "The Void" [level=3] [ref=e162]
+          - paragraph [ref=e163]: A terrifying dimension that exists parallel to our world, The Void is where the Umbral Sovereign and his legions of shadow creatures dwell. Traversing this realm is necessary for those seeking ultimate power, but the psychic strain and constant threat of corruption make expeditions incredibly dangerous. Ancient ruins and forgotten civilizations lie scattered throughout this endless twilight, remnants of those who dared to challenge the darkness and fell.
+        - generic [ref=e164]:
+          - generic [ref=e165]: 🌃
+          - heading "Twilight District" [level=3] [ref=e166]
+          - paragraph [ref=e167]: The bustling urban heart where the Waking World and Twilight Realm intersect most prominently, the Twilight District never truly sleeps. Neon lights mix with mystical auroras as citizens go about their lives, often unaware of the magical currents flowing beneath their feet. Street markets sell both ordinary goods and enchanted artifacts, while hidden clubs serve as meeting points for Eclipse Force practitioners. Here, the boundaries between worlds blur with every sunset.
+        - generic [ref=e168]:
+          - generic [ref=e169]: 🗼
+          - heading "The Tower" [level=3] [ref=e170]
+          - paragraph [ref=e171]: Rising impossibly high above the surrounding landscape, The Tower is the nexus point where all Eclipse Force energy converges. Ancient builders constructed this monument eons ago, though no records survive of their civilization. At its peak lies a portal to the deepest reaches of The Void, guarded by trials that test the very soul of any who seek passage. Only those deemed worthy by The Tower itself may ascend its endless staircases.
+  - generic [ref=e172]:
+    - img "Epic battle scene in the Twilight Realm" [ref=e174]
+    - generic [ref=e178]:
+      - generic [ref=e179]:
+        - heading "Combat System Preview" [level=2] [ref=e180]
+        - paragraph [ref=e181]: Master three distinct combat styles to overcome the darkness that threatens both worlds
+      - generic [ref=e183]:
+        - generic [ref=e185] [cursor=pointer]:
+          - generic [ref=e186]: ⚔️
+          - heading "Tactical Turn-Based" [level=3] [ref=e187]
+          - paragraph [ref=e188]: Master strategic combat with timed actions and party coordination.
+          - paragraph [ref=e189]: Experience the depth of tactical turn-based combat where every decision matters. Command your party of allies, exploit enemy weaknesses, and time your abilities for maximum impact. The innovative All-Out Attack system rewards clever thinking with devastating combination moves that can turn the tide of battle in an instant. Plan your strategy, read enemy patterns, and execute perfectly timed counterattacks to emerge victorious against even the most formidable foes.
+          - generic [ref=e190]:
+            - generic [ref=e191]: Learn More
+            - img [ref=e192]
+        - generic [ref=e195] [cursor=pointer]:
+          - generic [ref=e196]: 🔮
+          - heading "Fusion System" [level=3] [ref=e197]
+          - paragraph [ref=e198]: Combine abilities through character fusion for overwhelming power.
+          - paragraph [ref=e199]: Harness the mystical Fusion System to unlock devastating combination techniques. When allies synchronize their Eclipse Force, they can perform spectacular fusion attacks that combine their unique abilities into catastrophic power. Chain basic attacks into powerful skills, then trigger climactic All-Out Attacks that devastate entire enemy formations. The fusion meter builds with each well-timed action, offering players the thrill of explosive payoffs for skilled play. Master the timing and watch your enemies crumble before your combined might.
+          - generic [ref=e200]:
+            - generic [ref=e201]: Learn More
+            - img [ref=e202]
+        - generic [ref=e205] [cursor=pointer]:
+          - generic [ref=e206]: 💥
+          - heading "All-Out Attacks" [level=3] [ref=e207]
+          - paragraph [ref=e208]: Unleash spectacular finishing moves with your entire party.
+          - paragraph [ref=e209]: When the situation reaches its peak, gather your entire party for an All-Out Attack—the most spectacular technique in your arsenal. All party members converge on a single target in a dazzling display of coordinated power, each contributing their unique abilities to create a cinematic finishing move that exceeds the sum of its parts. These moments define the heat of battle, turning seemingly impossible encounters into triumphant victories. The thrill of executing a perfectly timed All-Out Attack remains unmatched, delivering satisfaction that keeps players hungry for more.
+          - generic [ref=e210]:
+            - generic [ref=e211]: Learn More
+            - img [ref=e212]
+  - generic [ref=e215]:
+    - generic [ref=e216]:
+      - generic [ref=e217]: GAME FEATURES
+      - heading "What Awaits You" [level=2] [ref=e218]
+      - paragraph [ref=e219]: Discover the features that make Eclipse Chronicles an unforgettable journey.
+    - generic [ref=e220]:
+      - generic [ref=e221]:
+        - img "Social Links" [ref=e223]
+        - heading "Social Links" [level=3] [ref=e225]
+        - paragraph [ref=e226]: Connect with friends through our integrated social system. Share your achievements, compare progress, and team up for co-op missions that span both the Waking World and the Twilight Realm. Build lasting friendships as you journey together through our interconnected game world.
+      - generic [ref=e227]:
+        - img "Day/Night Cycle" [ref=e229]
+        - heading "Day/Night Cycle" [level=3] [ref=e231]
+        - paragraph [ref=e232]: Experience a living world that changes with time. Different events, enemies, and story encounters occur based on the time of day. The twilight hours bring unique opportunities and challenges that reward players who explore at all hours.
+      - generic [ref=e233]:
+        - img "50+ Hours Story" [ref=e235]
+        - heading "50+ Hours Story" [level=3] [ref=e237]
+        - paragraph [ref=e238]: Immerse yourself in an epic narrative spanning over fifty hours of main story content. Multiple endings, branching paths, and hidden subplots ensure every playthrough reveals new secrets. Your choices genuinely matter and shape the fate of both worlds.
+      - generic [ref=e239]:
+        - img "Difficulty Options" [ref=e241]
+        - heading "Difficulty Options" [level=3] [ref=e243]
+        - paragraph [ref=e244]: Choose your challenge level from casual story mode to brutal hard mode. Every difficulty offers unique gameplay adjustments, enemy placements, and reward structures. Play at your pace and enjoy the experience your way.
+      - generic [ref=e245]:
+        - img "New Game+" [ref=e247]
+        - heading "New Game+" [level=3] [ref=e249]
+        - paragraph [ref=e250]: Return to the Twilight Realm with all your abilities, items, and progress intact. Face new challenges with enhanced difficulty, discover alternate story branches, and unlock secrets that were hidden in your first journey through the darkness.
+      - generic [ref=e251]:
+        - img "Achievement System" [ref=e253]
+        - heading "Achievement System" [level=3] [ref=e255]
+        - paragraph [ref=e256]: Hunt for over 100 unique achievements that reward exploration, skill mastery, and dedication. From hidden easter eggs to challenging combat feats, our achievement system offers endless goals to pursue long after the main story concludes.
+  - generic [ref=e258]:
+    - generic [ref=e259]:
+      - generic [ref=e260]: VISUAL GALLERY
+      - heading "Glimpse the Twilight" [level=2] [ref=e261]
+      - paragraph [ref=e262]: Experience the stunning visuals that bring our world to life.
+    - generic [ref=e263]:
+      - generic [ref=e264] [cursor=pointer]:
+        - img "Twilight District at night with neon lights" [ref=e265]
+        - generic [ref=e268]: The bustling Twilight District
+        - img [ref=e271]
+      - generic [ref=e273] [cursor=pointer]:
+        - img "Epic battle scene with fusion attacks" [ref=e274]
+        - generic [ref=e277]: "All-Out Attack: Fusion Strike"
+        - img [ref=e280]
+      - generic [ref=e282] [cursor=pointer]:
+        - img "Starshade Academy courtyard" [ref=e283]
+        - generic [ref=e286]: Starshade Academy Courtyard
+        - img [ref=e289]
+      - generic [ref=e291] [cursor=pointer]:
+        - img "Character close-up portrait" [ref=e292]
+        - generic [ref=e295]: Aiden in the Twilight Realm
+        - img [ref=e298]
+      - generic [ref=e300] [cursor=pointer]:
+        - img "The Tower in the distance" [ref=e301]
+        - generic [ref=e304]: The mysterious Tower looms
+        - img [ref=e307]
+      - generic [ref=e309] [cursor=pointer]:
+        - img "Dramatic eclipse moment" [ref=e310]
+        - generic [ref=e313]: The Eclipse begins
+        - img [ref=e316]
+  - generic [ref=e322]:
+    - generic [ref=e323]:
+      - heading "Experience the Soundtrack" [level=2] [ref=e324]
+      - paragraph [ref=e325]: Immerse yourself in the atmospheric melodies composed exclusively for Eclipse Chronicles
+    - generic [ref=e327]:
+      - generic [ref=e328]:
+        - img "Album artwork for Moonlit Academia" [ref=e331]
+        - generic [ref=e332]:
+          - generic [ref=e333]:
+            - heading "Moonlit Academia" [level=3] [ref=e334]
+            - paragraph [ref=e335]: "Eclipse Chronicles: Twilight Awakening"
+            - paragraph [ref=e336]: A serene yet mysterious melody that captures the magic of studying under starlit skies at Starshade Academy.
+          - generic [ref=e362]:
+            - slider "Audio progress" [ref=e363] [cursor=pointer]
+            - generic [ref=e365]:
+              - generic [ref=e366]: 0:00
+              - generic [ref=e367]: 3:42
+          - generic [ref=e368]:
+            - button "Previous track" [ref=e369]:
+              - img [ref=e370]
+            - button "Play" [ref=e372]:
+              - img [ref=e373]
+            - button "Next track" [ref=e375]:
+              - img [ref=e376]
+      - generic [ref=e378]:
+        - heading "All Tracks" [level=4] [ref=e379]
+        - generic [ref=e380]:
+          - button "Moonlit Academia 3:42" [ref=e381]:
+            - generic [ref=e383]:
+              - paragraph [ref=e384]: Moonlit Academia
+              - paragraph [ref=e385]: 3:42
+          - button "Shadow's Embrace 4:15" [ref=e386]:
+            - generic [ref=e388]:
+              - paragraph [ref=e389]: Shadow's Embrace
+              - paragraph [ref=e390]: 4:15
+          - button "Twilight Requiem 5:01" [ref=e391]:
+            - generic [ref=e393]:
+              - paragraph [ref=e394]: Twilight Requiem
+              - paragraph [ref=e395]: 5:01
+  - generic [ref=e401]:
+    - generic [ref=e403]: Coming 2025
+    - heading "Prepare for the Twilight" [level=2] [ref=e404]
+    - paragraph [ref=e405]: "Secure your copy of Eclipse Chronicles: Twilight Awakening and join the first wave of adventurers to explore the boundary between worlds."
+    - generic [ref=e406]:
+      - generic "PC" [ref=e407] [cursor=pointer]:
+        - generic [ref=e408]: 💻
+        - generic [ref=e409]: PC
+      - generic "PlayStation" [ref=e410] [cursor=pointer]:
+        - generic [ref=e411]: 🎮
+        - generic [ref=e412]: PlayStation
+      - generic "Xbox" [ref=e413] [cursor=pointer]:
+        - generic [ref=e414]: 🟢
+        - generic [ref=e415]: Xbox
+      - generic "Nintendo Switch" [ref=e416] [cursor=pointer]:
+        - generic [ref=e417]: 🔴
+        - generic [ref=e418]: Nintendo Switch
+    - generic [ref=e419]:
+      - button "Pre-order the game now" [ref=e420] [cursor=pointer]:
+        - generic [ref=e422]:
+          - img [ref=e423]
+          - text: Pre-Order Now
+      - button "Add to your wishlist" [ref=e425] [cursor=pointer]:
+        - generic [ref=e426]:
+          - img [ref=e427]
+          - text: Add to Wishlist
+  - generic [ref=e433]:
+    - generic [ref=e434]:
+      - heading "Words from the Creators" [level=2] [ref=e435]
+      - paragraph [ref=e436]: Hear directly from the talented team behind Eclipse Chronicles
+    - generic [ref=e438]:
+      - generic: "\""
+      - generic: "\""
+      - generic [ref=e440]:
+        - generic [ref=e441]:
+          - img "Kenji Nakamura, Game Director" [ref=e443]
+          - generic [ref=e444]: Game Director
+        - generic [ref=e445]:
+          - blockquote [ref=e446]:
+            - paragraph [ref=e447]: "\"Creating Eclipse Chronicles has been a dream spanning five years of dedicated passion. Our vision was to craft an experience that captures the magic of discovering hidden worlds beneath our everyday reality. We drew inspiration from classic JRPGs while pioneering new approaches to turn-based combat that feel both nostalgic and fresh. Every character in our game carries a piece of this vision—their struggles mirror our own journey in game development. Watching players connect with Aiden's story and the dual-world mechanic has been profoundly rewarding. The twilight aesthetic isn't just beautiful; it represents the liminal space between childhood wonder and adult responsibility, a theme that resonates deeply with our entire team.\""
+          - generic [ref=e448]:
+            - paragraph [ref=e449]: Kenji Nakamura
+            - paragraph [ref=e450]: Game Director, Eclipse Chronicles Development Team
+      - generic [ref=e451]:
+        - button "View quote from Kenji Nakamura" [ref=e452]
+        - button "View quote from Mei Chen" [ref=e453]
+        - button "View quote from Alex Rivera" [ref=e454]
+  - generic [ref=e456]:
+    - generic [ref=e457]: STAY CONNECTED
+    - heading "Join the Journey" [level=2] [ref=e458]
+    - paragraph [ref=e459]: Subscribe for exclusive updates, behind-the-scenes content, and early access opportunities.
+    - generic [ref=e460]:
+      - textbox "your.email@domain.com" [ref=e462]
+      - generic [ref=e463]:
+        - button [ref=e464]
+        - generic [ref=e465]:
+          - text: I agree to receive email updates and accept the
+          - button "Privacy Policy" [ref=e466]
+      - button "SUBSCRIBE" [ref=e467]
+  - generic [ref=e469]:
+    - generic [ref=e470]:
+      - generic [ref=e471]: JOURNEY TIMELINE
+      - heading "The Path to Launch" [level=2] [ref=e472]
+      - paragraph [ref=e473]: Follow our development journey from announcement to release.
+    - generic [ref=e475]:
+      - generic [ref=e477]:
+        - img "Announcement" [ref=e479]
+        - generic [ref=e480]:
+          - text: Q1 2025
+          - heading "Announcement" [level=3] [ref=e481]
+          - paragraph [ref=e482]: Eclipse Chronicles revealed to the world with first details and key art.
+      - generic [ref=e483]:
+        - img "First Trailer" [ref=e485]
+        - generic [ref=e486]:
+          - text: Q2 2025
+          - heading "First Trailer" [level=3] [ref=e487]
+          - paragraph [ref=e488]: Cinematic reveal showcasing story, characters, and combat systems.
+      - generic [ref=e489]:
+        - img "Gameplay Reveal" [ref=e491]
+        - generic [ref=e492]:
+          - text: Q3 2025
+          - heading "Gameplay Reveal" [level=3] [ref=e493]
+          - paragraph [ref=e494]: Extended gameplay footage demonstrating core mechanics and world exploration.
+      - generic [ref=e495]:
+        - img "Beta Test" [ref=e497]
+        - generic [ref=e498]:
+          - text: Q4 2025
+          - heading "Beta Test" [level=3] [ref=e499]
+          - paragraph [ref=e500]: Limited access beta available for selected players to experience early content.
+      - generic [ref=e501]:
+        - img "Official Release" [ref=e503]
+        - generic [ref=e504]:
+          - text: Q1 2026
+          - heading "Official Release" [level=3] [ref=e505]
+          - paragraph [ref=e506]: Full game launch across all platforms with complete story and features.
+  - generic [ref=e508]:
+    - generic [ref=e509]:
+      - generic [ref=e510]: FREE DOWNLOADS
+      - heading "Set Your Screens Ablaze" [level=2] [ref=e511]
+      - paragraph [ref=e512]: Download high-quality wallpapers to personalize your devices with Eclipse Chronicles art.
+    - generic [ref=e513]:
+      - generic [ref=e514]:
+        - img "Key Art" [ref=e516]
+        - generic [ref=e518]:
+          - heading "Key Art" [level=3] [ref=e519]
+          - paragraph [ref=e520]: The protagonist faces destiny against the twilight sky.
+          - generic [ref=e521]:
+            - generic [ref=e522]: 1920×1080
+            - generic [ref=e523]: 2560×1440
+            - generic [ref=e524]: 3840×2160
+            - generic [ref=e525]: Mobile
+          - generic [ref=e526]:
+            - button "↓ 1080p" [ref=e527]
+            - button "↓ 1440p" [ref=e528]
+            - button "↓ 4K" [ref=e529]
+      - generic [ref=e530]:
+        - img "Battle Scene" [ref=e532]
+        - generic [ref=e534]:
+          - heading "Battle Scene" [level=3] [ref=e535]
+          - paragraph [ref=e536]: Epic fusion attacks light up the battlefield.
+          - generic [ref=e537]:
+            - generic [ref=e538]: 1920×1080
+            - generic [ref=e539]: 2560×1440
+            - generic [ref=e540]: 3840×2160
+            - generic [ref=e541]: Mobile
+          - generic [ref=e542]:
+            - button "↓ 1080p" [ref=e543]
+            - button "↓ 1440p" [ref=e544]
+            - button "↓ 4K" [ref=e545]
+      - generic [ref=e546]:
+        - img "Character Ensemble" [ref=e548]
+        - generic [ref=e550]:
+          - heading "Character Ensemble" [level=3] [ref=e551]
+          - paragraph [ref=e552]: All five main characters united for the journey.
+          - generic [ref=e553]:
+            - generic [ref=e554]: 1920×1080
+            - generic [ref=e555]: 2560×1440
+            - generic [ref=e556]: 3840×2160
+            - generic [ref=e557]: Mobile
+          - generic [ref=e558]:
+            - button "↓ 1080p" [ref=e559]
+            - button "↓ 1440p" [ref=e560]
+            - button "↓ 4K" [ref=e561]
+      - generic [ref=e562]:
+        - img "Eclipse Moment" [ref=e564]
+        - generic [ref=e566]:
+          - heading "Eclipse Moment" [level=3] [ref=e567]
+          - paragraph [ref=e568]: The mysterious eclipse that changes everything.
+          - generic [ref=e569]:
+            - generic [ref=e570]: 1920×1080
+            - generic [ref=e571]: 2560×1440
+            - generic [ref=e572]: 3840×2160
+            - generic [ref=e573]: Mobile
+          - generic [ref=e574]:
+            - button "↓ 1080p" [ref=e575]
+            - button "↓ 1440p" [ref=e576]
+            - button "↓ 4K" [ref=e577]
+  - generic [ref=e579]:
+    - generic [ref=e580]: CONNECT WITH US
+    - heading "Join 50K+ Fans" [level=2] [ref=e581]
+    - paragraph [ref=e582]: Follow us on social media for exclusive updates, behind-the-scenes content, and community events.
+    - generic [ref=e583]:
+      - link "Follow us on Twitter/X" [ref=e584] [cursor=pointer]:
+        - /url: https://twitter.com/eclipsechronicles
+        - img [ref=e585]
+      - link "Follow us on Instagram" [ref=e587] [cursor=pointer]:
+        - /url: https://instagram.com/eclipsechronicles
+        - img [ref=e588]
+      - link "Subscribe to our YouTube channel" [ref=e590] [cursor=pointer]:
+        - /url: https://youtube.com/@eclipsechronicles
+        - img [ref=e591]
+      - link "Join our Discord server" [ref=e593] [cursor=pointer]:
+        - /url: https://discord.gg/eclipsechronicles
+        - img [ref=e594]
+      - link "Follow us on TikTok" [ref=e596] [cursor=pointer]:
+        - /url: https://tiktok.com/@eclipsechronicles
+        - img [ref=e597]
+    - button "Share This Page" [ref=e599]:
+      - img [ref=e600]
+      - text: Share This Page
+  - generic [ref=e603]:
+    - generic [ref=e604]: Eclipse ChroniclesTwilight Awakening
+    - paragraph [ref=e605]: © 2025 All rights reserved. A journey between worlds awaits.

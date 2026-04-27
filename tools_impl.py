@@ -1020,30 +1020,41 @@ def _kill_port(port: int) -> None:
         run_bash(f"fuser -k {port}/tcp 2>/dev/null || lsof -ti:{port} | xargs kill -9 2>/dev/null; echo done", timeout=10)
 
 def _kill_dev_server() -> None:
-    """"""
+    """Kill dev server and clear build caches to prevent stale content."""
     _kill_port(3000)
     _kill_port(5173)
+    # Give processes time to release file locks before clearing cache
+    time.sleep(1)
+    # FIX: Clear Turbopack dev cache so the next dev server restart
+    # picks up the latest file changes instead of serving stale compiled output.
+    ws = Path(config.WORKSPACE)
+    for cache_dir in (ws / ".next" / "cache", ws / ".next" / "turbopack"):
+        if cache_dir.exists():
+            try:
+                import shutil
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            except Exception:
+                pass
+    # FIX: Clear Vite cache to prevent stale pre-bundled deps / HMR state
+    vite_cache = ws / "node_modules" / ".vite"
+    if vite_cache.exists():
+        try:
+            import shutil
+            shutil.rmtree(vite_cache, ignore_errors=True)
+            log.info("[dev_server] Cleared Vite cache (node_modules/.vite)")
+        except Exception:
+            pass
 
-def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int = 10) -> str:
+def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int = 15) -> str:
+    """启动 dev server。
+
+    注意：BuildGateStage 已经验证过构建通过，此处不再重复运行 npm run build，
+    也不再无条件删除 .next 缓存（这会强制 Next.js 重新编译，显著增加启动时间）。
+    """
     global _dev_server_proc
     ws = Path(config.WORKSPACE)
     _kill_port(port)
     time.sleep(1)
-    next_cache = ws / ".next"
-    if next_cache.exists():
-        if os.name == "nt":
-            run_bash("rmdir /s /q .next", timeout=30)
-        else:
-            run_bash("rm -rf .next", timeout=30)
-    if (ws / "package.json").exists():
-        build_result = run_bash("npm run build 2>&1 | tail -20", timeout=180)
-        has_error = (
-            "error" in build_result.lower()
-            and "0 errors" not in build_result.lower()
-            and "compiled successfully" not in build_result.lower()
-        )
-        if has_error:
-            return f"[BUILD ERROR]\n{build_result[:1000]}"
     kwargs = {
         "shell": True,
         "cwd": config.WORKSPACE,
@@ -1159,6 +1170,20 @@ def browser_test(
 ) -> str:
     """Browser test using Playwright MCP server."""
     from tools.playwright_mcp import browser_test_mcp
+
+    # FIX: LLM sometimes passes actions as a JSON string instead of a list.
+    # Defensively parse it to prevent 'str' object has no attribute 'get' crash.
+    if isinstance(actions, str):
+        try:
+            actions = json.loads(actions)
+        except json.JSONDecodeError:
+            actions = None
+    if isinstance(viewport, str):
+        try:
+            viewport = json.loads(viewport)
+        except json.JSONDecodeError:
+            viewport = None
+
     if start_command:
         server_result = start_dev_server(start_command, port, startup_wait)
         if server_result.startswith("[error]"):
