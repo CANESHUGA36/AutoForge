@@ -1024,7 +1024,7 @@ def _kill_dev_server() -> None:
     _kill_port(3000)
     _kill_port(5173)
     # Give processes time to release file locks before clearing cache
-    time.sleep(1)
+    time.sleep(2)
     # FIX: Clear Turbopack dev cache so the next dev server restart
     # picks up the latest file changes instead of serving stale compiled output.
     ws = Path(config.WORKSPACE)
@@ -1036,14 +1036,30 @@ def _kill_dev_server() -> None:
             except Exception:
                 pass
     # FIX: Clear Vite cache to prevent stale pre-bundled deps / HMR state
-    vite_cache = ws / "node_modules" / ".vite"
-    if vite_cache.exists():
+    for vite_cache in (ws / "node_modules" / ".vite", ws / ".vite"):
+        if vite_cache.exists():
+            try:
+                import shutil
+                shutil.rmtree(vite_cache, ignore_errors=True)
+                log.info(f"[dev_server] Cleared Vite cache ({vite_cache})")
+            except Exception:
+                pass
+    # FIX: Clear Vite dist output to force full recompile on next dev start
+    dist_dir = ws / "dist"
+    if dist_dir.exists():
         try:
             import shutil
-            shutil.rmtree(vite_cache, ignore_errors=True)
-            log.info("[dev_server] Cleared Vite cache (node_modules/.vite)")
+            shutil.rmtree(dist_dir, ignore_errors=True)
+            log.info("[dev_server] Cleared dist/")
         except Exception:
             pass
+    # FIX: Touch main entry file to force Vite to invalidate its module graph
+    for entry in (ws / "src" / "main.tsx", ws / "src" / "main.jsx", ws / "src" / "index.tsx"):
+        if entry.exists():
+            try:
+                entry.touch(exist_ok=True)
+            except Exception:
+                pass
 
 def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int = 15) -> str:
     """启动 dev server。

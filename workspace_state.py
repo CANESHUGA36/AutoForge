@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ class FileState:
     lines: int = 0
     last_modified: float = 0.0
     summary: str = ""  # 内容摘要（前 200 字）
+    landmarks: dict = field(default_factory=dict)  # 关键结构位置索引
 
     def to_dict(self) -> dict:
         return {
@@ -38,6 +40,7 @@ class FileState:
             "size": self.size,
             "lines": self.lines,
             "summary": self.summary[:100],
+            "landmarks": self.landmarks,
         }
 
 
@@ -79,12 +82,17 @@ class WorkspaceState:
     dev_server_running: bool = False
     dev_server_port: int = 0
 
+    # 探索笔记：Builder 从 read_file 中发现的关键信息
+    discoveries: list[str] = field(default_factory=list)
+
     def update_from_tool_result(self, tool_name: str, arguments: dict, result: str) -> None:
         """基于工具调用结果增量更新状态。"""
         if tool_name == "write_file":
             self._update_file(arguments.get("path", ""), result)
         elif tool_name == "edit_file":
             self._update_file(arguments.get("path", ""), result)
+        elif tool_name == "read_file":
+            self._update_discovery_from_read(arguments.get("path", ""), result)
         elif tool_name == "run_bash":
             self._update_from_bash(arguments.get("command", ""), result)
         elif tool_name == "browser_test":
@@ -102,12 +110,14 @@ class WorkspaceState:
                 return
             content = p.read_text(encoding="utf-8", errors="replace")
             lines = content.count("\n") + 1
+            landmarks = self._extract_landmarks(content)
             self.files[path] = FileState(
                 path=path,
                 size=len(content),
                 lines=lines,
                 last_modified=p.stat().st_mtime,
                 summary=content[:200].replace("\n", " "),
+                landmarks=landmarks,
             )
             self.total_files = len(self.files)
             self.total_lines = sum(f.lines for f in self.files.values())
@@ -164,6 +174,83 @@ class WorkspaceState:
         else:
             self.last_test_status = "ok"
 
+    def _extract_landmarks(self, content: str) -> dict:
+        """从代码文件中提取关键结构位置索引。"""
+        landmarks = {}
+        lines = content.split('\n')
+
+        # imports 区域
+        import_end = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                import_end = i
+        if import_end > 0:
+            landmarks['imports'] = f"1-{import_end + 1}"
+
+        # 组件 / 函数定义
+        components = {}
+        for i, line in enumerate(lines):
+            m = re.search(r'(?:export\s+)?(?:function|const|let|var)\s+([A-Z][a-zA-Z0-9_]*)\s*[\(=:]', line)
+            if m:
+                components[m.group(1)] = i + 1
+        if components:
+            landmarks['components'] = components
+
+        # hooks 使用位置
+        hooks = {}
+        for i, line in enumerate(lines):
+            for m in re.finditer(r'(use[A-Z][a-zA-Z0-9_]*)\s*\(', line):
+                hook_name = m.group(1)
+                if hook_name not in hooks:
+                    hooks[hook_name] = i + 1
+        if hooks:
+            landmarks['hooks'] = hooks
+
+        # export default
+        for i, line in enumerate(lines):
+            if 'export default' in line:
+                landmarks['exports'] = f"{i + 1}-{i + 1}"
+                break
+
+        return landmarks
+
+    def _update_discovery_from_read(self, path: str, result: str) -> None:
+        """从 read_file 结果中提取 Builder 的关键发现，避免重复探索。"""
+        if not path or result.startswith("[error]"):
+            return
+
+        new_discoveries = []
+        lines = result.split('\n')
+        for i, line in enumerate(lines):
+            # JSX 组件渲染: <ComponentName ...>
+            for m in re.finditer(r'<([A-Z][a-zA-Z0-9_]*)[^/>]*>', line):
+                comp = m.group(1)
+                d = f"{path}: <{comp}> rendered @line{i + 1}"
+                if d not in self.discoveries and d not in new_discoveries:
+                    new_discoveries.append(d)
+
+            # 组件 / 函数定义
+            m = re.search(r'(?:export\s+)?(?:function|const)\s+([A-Z][a-zA-Z0-9_]*)', line)
+            if m:
+                comp = m.group(1)
+                d = f"{path}: {comp} defined @line{i + 1}"
+                if d not in self.discoveries and d not in new_discoveries:
+                    new_discoveries.append(d)
+
+            # hooks 调用
+            for m in re.finditer(r'(use[A-Z][a-zA-Z0-9_]*)\s*\(', line):
+                hook = m.group(1)
+                d = f"{path}: {hook}() used @line{i + 1}"
+                if d not in self.discoveries and d not in new_discoveries:
+                    new_discoveries.append(d)
+
+        if new_discoveries:
+            self.discoveries.extend(new_discoveries)
+            # 限制总长度，防止无限增长
+            if len(self.discoveries) > 200:
+                self.discoveries = self.discoveries[-150:]
+
     def _update_file_list(self, result: str) -> None:
         """从 list_files 结果更新文件列表"""
         if result.startswith("[error]") or result == "(empty)":
@@ -187,16 +274,27 @@ class WorkspaceState:
         """
         parts = ["## Workspace State"]
 
-        # 文件概览
+        # 文件概览（增强：带 landmarks 索引）
         parts.append(f"\n### Files ({self.total_files} files, {self.total_lines} lines)")
-        # 只列出最近修改的 10 个文件
         recent_files = sorted(
             self.files.values(),
             key=lambda f: f.last_modified,
             reverse=True
         )[:10]
         for f in recent_files:
-            parts.append(f"- {f.path} ({f.lines}L)")
+            extra = []
+            if f.landmarks:
+                comps = f.landmarks.get('components', {})
+                hooks = f.landmarks.get('hooks', {})
+                if comps:
+                    extra.append(f"comps:{comps}")
+                if hooks:
+                    extra.append(f"hooks:{hooks}")
+                imports = f.landmarks.get('imports', '')
+                if imports:
+                    extra.append(f"imports:{imports}")
+            extra_str = f" — {'; '.join(extra)}" if extra else ""
+            parts.append(f"- {f.path} ({f.lines}L){extra_str}")
 
         # 构建状态
         parts.append(f"\n### Build Status: {self.last_build_status}")
@@ -218,6 +316,12 @@ class WorkspaceState:
             for issue in self.open_issues[:5]:
                 parts.append(f"- {issue[:100]}")
 
+        # 探索笔记：Builder 已发现的关键位置
+        if self.discoveries:
+            parts.append(f"\n### Discoveries ({len(self.discoveries)})")
+            for d in self.discoveries[-15:]:
+                parts.append(f"- {d}")
+
         summary = "\n".join(parts)
         if len(summary) > max_chars:
             summary = summary[:max_chars] + "\n...[TRUNCATED]"
@@ -236,6 +340,7 @@ class WorkspaceState:
             "current_sprint_goal": self.current_sprint_goal,
             "completed_tasks": self.completed_tasks,
             "open_issues": self.open_issues,
+            "discoveries": self.discoveries,
         }
 
     def save(self, workspace: str) -> None:
@@ -270,7 +375,9 @@ class WorkspaceState:
                     size=fdata.get("size", 0),
                     lines=fdata.get("lines", 0),
                     summary=fdata.get("summary", ""),
+                    landmarks=fdata.get("landmarks", {}),
                 )
+            state.discoveries = data.get("discoveries", [])
             # Recompute totals from restored files
             state.total_files = len(state.files)
             state.total_lines = sum(f.lines for f in state.files.values())

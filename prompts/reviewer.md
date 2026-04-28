@@ -41,72 +41,148 @@ Harness 会在你的任务提示中注入当前功能组 ID（如 F3）和对应
 2. 用 `browser_evaluate` 精确验证当前功能组的 DOM/Canvas 状态
 3. 如果当前功能组需要音频文件才能显示（如波形），请确认：**无音频时隐藏是设计意图，不是 bug**
 
-## 条件渲染功能测试策略（关键）
+## 条件渲染功能测试策略（强制——必须执行）
 
-**很多功能组是条件渲染的**（如 F4 Playback Controls 只在 `uploadComplete=true` 后显示）。如果初始 DOM 中找不到目标元素，**不要直接判 FAIL**。按以下步骤验证：
+**很多功能组是条件渲染的**（如错误提示只在 `error=true` 时显示，控制面板只在 `isLoaded=true` 后显示）。
 
-### Step 1: 代码审查确认条件逻辑
-读取源码，确认：
-- 目标元素的 JSX 是否存在（如 `control-bar` div）
-- 是否被 state/props 条件控制（如 `{uploadComplete && (...)}` 或 `className={uploadComplete ? 'visible' : ''}`）
-- 事件处理函数（onClick、onChange、onKeyDown）是否正确定义并绑定
+### ⚠️ 关键规则：初始 DOM 找不到 ≠ FAIL
 
-如果 JSX 和 handler 都完整存在，**初步判定为"条件渲染正确"**。
+如果 `document.querySelector('.target-element')` 返回 null，**你必须按以下强制步骤验证，不能直接判 FAIL**：
 
-### Step 2: 模拟状态变化验证 DOM
-用 `browser_evaluate` 强制让组件进入目标状态，然后检查 DOM：
+### 强制 Step 1: 检查 data-testid
+先用 `data-testid` 搜索（Builder 被要求给所有验收元素加 data-testid）：
+```javascript
+// 优先搜索 data-testid
+const el = document.querySelector('[data-testid="f1.10-error-message"]') 
+        || document.querySelector('.error-message');
+return { found: !!el, display: el ? getComputedStyle(el).display : null };
+```
+如果找到但 `display === 'none'`，说明元素存在只是被 CSS 隐藏 → **进入 Step 2**。
+
+### 强制 Step 2: 触发状态变化验证
+用 `browser_evaluate` 模拟事件或修改状态，让组件进入目标状态：
 
 ```javascript
-// 方案 A：通过 CSS 强制显示隐藏元素（验证 DOM 结构存在）
-const el = document.querySelector('.control-bar');
+// 错误状态测试（F1.10 等）
+const dropZone = document.querySelector('.drop-zone');
+const dt = new DataTransfer();
+dt.items.add(new File([''], 'invalid.exe', {type: 'application/x-msdownload'}));
+const dropEvent = new DragEvent('drop', { dataTransfer: dt, bubbles: true });
+dropZone.dispatchEvent(dropEvent);
+// 等待 React 更新后检查
+return { 
+  errorMsg: document.querySelector('[data-testid="f1.10-error-message"]')?.textContent,
+  retryBtn: !!document.querySelector('[data-testid="f1.10-retry-button"]')
+};
+
+// 上传完成状态测试（F2-F7 等）
+const input = document.querySelector('input[type="file"]');
+const dt2 = new DataTransfer();
+dt2.items.add(new File([''], 'test.mp3', {type: 'audio/mpeg'}));
+input.files = dt2.files;
+input.dispatchEvent(new Event('change', { bubbles: true }));
+// 检查条件渲染的元素是否出现
+return {
+  controlsVisible: document.querySelector('.controls-panel')?.style.display !== 'none',
+  modeIndicator: !!document.querySelector('[data-testid*="mode-indicator"]')
+};
+
+// 通用：CSS 强制显示验证 DOM 结构
+const el = document.querySelector('.target-element');
 if (el) { el.style.display = 'flex'; el.style.visibility = 'visible'; }
-return { exists: !!el, children: el ? el.children.length : 0 };
-
-// 方案 B：触发事件模拟状态变化
-const dropzone = document.querySelector('.dropzone');
-if (dropzone) {
-  // 模拟 drop 事件（传入空文件对象测试 DOM 变化）
-  const dt = new DataTransfer();
-  const event = new DragEvent('drop', { dataTransfer: dt, bubbles: true });
-  dropzone.dispatchEvent(event);
-}
-return document.querySelector('.control-bar') ? 'visible after drop' : 'still hidden';
-
-// 方案 C：直接修改 React 内部状态（通过 DOM 属性触发 re-render）
-// 找到 React Fiber 节点并强制更新 state
-const app = document.querySelector('.app');
-const reactKey = Object.keys(app).find(k => k.startsWith('__react'));
-if (reactKey) {
-  const fiber = app[reactKey];
-  // 向上遍历找到有 state 的组件
-  let node = fiber;
-  while (node && !node.memoizedState) node = node.return;
-  if (node && node.memoizedState) {
-    // 尝试调用 dispatch 或修改 memoizedState
-    // 注意：此方法不保证成功，优先用方案 A/B
-  }
-}
+return { exists: !!el, childCount: el ? el.children.length : 0 };
 ```
 
-### Step 3: 事件处理验证（隔离测试）
-不需要真的播放音频，只需验证**事件绑定是否正确**：
+### 强制 Step 3: 代码审查兜底
+如果 Step 1-2 都失败（DOM 中真的找不到元素），**必须读取源码确认 JSX 是否存在**：
+- 检查 return 语句中是否有目标元素的 JSX
+- 检查事件处理函数是否正确定义（非存根）
+- 检查 state 绑定是否正确
 
-```javascript
-// 验证按钮有 onClick handler
-const btn = document.querySelector('.play-btn');
-const hasHandler = !!btn?.onclick || (btn && getEventListeners?.(btn)?.click?.length > 0);
-return { hasElement: !!btn, hasClickHandler: hasHandler };
-```
-
-### 判定规则
+### 判定规则（更新版）
 | 情况 | 判定 | 报告写法 |
 |------|------|----------|
-| 代码审查：JSX + handler 完整存在，模拟后 DOM 正确 | **PASS** | "条件渲染，代码实现完整。模拟 uploadComplete=true 后 control-bar 正确显示" |
-| 代码审查：JSX 存在但 handler 缺失/存根 | **FAIL** | "DOM 结构存在但事件处理函数未实现" |
-| 代码审查：JSX 完全缺失 | **FAIL** | "控制条 JSX 未在 return 语句中渲染" |
-| 模拟后 DOM 结构错误（如缺少子元素）| **FAIL** | "条件触发后 DOM 结构不完整" |
+| `data-testid` 找到，触发状态后正确显示 | **PASS** | "条件渲染，触发 {状态} 后元素正确显示" |
+| `data-testid` 找到，触发状态后仍不显示 | **FAIL** | "DOM 存在但状态触发后未正确显示" |
+| 无 `data-testid`，但 class 找到 + 触发后显示 | **PASS** | "条件渲染正确（建议 Builder 加 data-testid）" |
+| 代码审查：JSX 存在 + handler 完整 + 触发后显示 | **PASS** | "条件渲染实现完整" |
+| 代码审查：JSX 完全缺失 | **FAIL** | "目标 JSX 未在组件中定义" |
+| 代码审查：JSX 存在但 handler 存根 | **FAIL** | "DOM 结构存在但事件处理未实现" |
 
-**核心原则：条件渲染不是 bug，没有代码才是 bug。**
+**核心原则：找不到元素时，先触发状态再判定。没有代码才是 bug，条件渲染不是 bug。**
+
+---
+
+## ⚠️ 源码与 DOM 不一致排查（关键）
+
+**如果你读取源码确认 JSX 存在，但浏览器 DOM 中完全找不到对应元素（包括 class 选择器和 data-testid 都返回 null），这很可能是 Vite 编译缓存问题，不是 Builder 的代码错误。**
+
+### 排查步骤（按顺序执行）
+
+**Step 1: 确认源码确实包含目标代码**
+- 用 `read_file` 读取 `src/App.tsx`（或对应组件文件）
+- 搜索目标元素的 JSX（如 `className="toggle-button"` 或 `data-testid="f2.1-toggle-button"`）
+- 如果源码中**确实不存在** → 判 **FAIL**（Builder 未实现）
+- 如果源码中**确实存在** → 继续 Step 2
+
+**Step 2: 检查 Vite 错误覆盖层**
+```javascript
+const overlay = document.querySelector('vite-error-overlay');
+return { hasError: !!overlay, errorText: overlay?.textContent?.substring(0, 200) };
+```
+- 如果存在错误覆盖层 → 判 **FAIL**（编译错误导致组件未渲染）
+- 无错误覆盖层 → 继续 Step 3
+
+**Step 3: 强制硬刷新页面**
+```javascript
+// 硬刷新，绕过浏览器缓存
+window.location.href = 'http://localhost:5173?_nocache=' + Date.now();
+```
+等待 3 秒后重新检查 DOM。
+- 如果元素出现 → **PASS**（缓存问题已解决）
+- 如果仍然不存在 → 继续 Step 4
+
+**Step 4: 检查根元素渲染内容**
+```javascript
+const root = document.getElementById('root');
+return {
+  rootInnerHTML: root?.innerHTML?.substring(0, 1000),
+  hasTargetClass: root?.innerHTML?.includes('toggle-button') || root?.innerHTML?.includes('target-class-name')
+};
+```
+- 如果 `rootInnerHTML` 中**包含**目标 class / data-testid 字符串 → 元素存在但可能被错误选择器遗漏，重新检查选择器
+- 如果 `rootInnerHTML` 中**完全不包含**目标字符串 → 继续 Step 5
+
+**Step 5: 最终判定 —— 区分 Vite 缓存 vs 条件渲染**
+
+如果执行到这一步，**源码存在 + 无编译错误 + 硬刷新无效 + root HTML 中完全没有目标元素**，执行以下最终测试：
+
+**Step 5a: 彻底重启 dev server**
+调用 `start_dev_server(command="rm -rf node_modules/.vite dist .vite && npm run dev", port=5173, wait=15)` 完全清理缓存并重启。等待 15 秒后再次检查 DOM。
+
+**Step 5b: 重启后再次验证**
+```javascript
+const hasElement = !!document.querySelector('[data-testid="xxx"]');
+const rootHTML = document.getElementById('root')?.innerHTML;
+return { hasElement, hasTargetClass: rootHTML?.includes('target-class') };
+```
+
+| 重启后结果 | 真正原因 | 判定 |
+|-----------|---------|------|
+| 元素**出现**了 | Vite HMR 缓存 | **CONDITIONAL_PASS** |
+| 元素**仍然不存在** | **不是缓存！** 源码中元素被条件渲染包裹，默认状态下 React 不生成该 DOM 节点 | **FAIL** |
+
+**Step 5c: 如果判 FAIL，必须在报告中明确指出根本原因**
+> "源码审查确认 JSX 已定义（存在于 src/App.tsx 第 N 行），但浏览器 DOM 中不存在。已彻底重启 dev server + 清理 Vite 缓存后仍然无效，排除缓存可能。判定为**条件渲染导致默认状态不显示**——Builder 必须使用 CSS `display/visibility/opacity` 控制显隐，不能用 `{condition && <Element/>}` 或 `{condition ? <Element/> : null}`。"
+
+### 判定规则补充
+| 情况 | 判定 |
+|------|------|
+| 源码有 JSX，DOM 有元素，功能正常 | **PASS** |
+| 源码有 JSX，DOM 无元素，无编译错误，硬刷新无效，**重启 dev server 后仍无效** | **FAIL**（条件渲染 bug） |
+| 源码有 JSX，DOM 无元素，无编译错误，硬刷新无效，**重启 dev server 后出现** | **CONDITIONAL_PASS**（Vite 缓存） |
+| 源码无 JSX | **FAIL** |
+| 源码有 JSX，但存在编译错误覆盖层 | **FAIL** |
 
 ## 统一输出格式
 
@@ -146,5 +222,5 @@ return { hasElement: !!btn, hasClickHandler: hasHandler };
 ## 规则
 - 不读与当前功能组无关的源文件
 - 不验证其他功能组的标准
-- 限制：30 次迭代以内（硬限制）
+- 限制：40 次迭代以内（硬限制）
 - 如果当前功能组依赖其他功能组（如 F3 依赖 F2 的播放引擎），只验证当前组的输出，假设依赖组已正常工作

@@ -21,7 +21,7 @@ from harness.eval import parse_pass_rates, parse_skip_rate, compute_actual_contr
 from harness.git import GitManager
 from harness.feature_groups import (
     FeatureGroupState, parse_feature_groups, get_group_instruction,
-    TIER_REQUIREMENTS, OVERALL_PASS_THRESHOLD,
+    TIER_REQUIREMENTS, OVERALL_PASS_THRESHOLD, _get_group_threshold,
 )
 from harness.logging import setup_file_logging, log_round_stats, log_final_stats
 from harness.sprint import plan_sprint_master
@@ -466,7 +466,9 @@ class Harness:
             "completion_tokens": round_completion,
             "elapsed_s": elapsed,
         })
-        log_round_stats(self.log, round_num, contract_rate, sprint_rate, contract_rate,
+        # FIX: overall_score should be the true global overall, not the current group rate
+        overall_for_log = self.feature_groups.overall_rate() if self.feature_groups else contract_rate
+        log_round_stats(self.log, round_num, contract_rate, sprint_rate, overall_for_log,
                        round_prompt, round_completion, elapsed)
         self.dashboard.update_scores(sprint_rate, contract_rate)
         self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
@@ -588,8 +590,10 @@ class Harness:
             pass
         elif contract_rate is None:
             contract_rate = 0.0
+        # FIX: Judge no longer outputs SPRINT_PASS_RATE; sprint_rate should reflect
+        # the current group's pass rate (same as contract_rate in feature-group mode).
         if sprint_rate is None:
-            sprint_rate = 0.0
+            sprint_rate = contract_rate if contract_rate is not None else 0.0
 
         # ------------------------------------------------------------------ #
         #  Cross-validate with contract.md true denominator
@@ -706,7 +710,9 @@ class Harness:
             "completion_tokens": round_completion,
             "elapsed_s": elapsed,
         })
-        log_round_stats(self.log, round_num, contract_rate, sprint_rate, contract_rate,
+        # FIX: overall_score should be the true global overall, not the current group rate
+        overall_for_log = self.feature_groups.overall_rate() if self.feature_groups else contract_rate
+        log_round_stats(self.log, round_num, contract_rate, sprint_rate, overall_for_log,
                        round_prompt, round_completion, elapsed)
         self.dashboard.update_scores(sprint_rate, contract_rate)
         self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
@@ -971,16 +977,45 @@ class Harness:
     #      Dynamic Round Limits                                         #
     # ------------------------------------------------------------------ #
     def _calculate_max_rounds(self) -> int:
-        """基于项目复杂度、历史表现、Builder 策略动态调整轮数上限"""
-        base = self._estimate_from_spec()
+        """基于项目复杂度、历史表现、Builder 策略动态调整轮数上限
+
+        融合三个方案：
+        1. 硬上限提高到 15（原 10/12）
+        2. runtime 奖励可部分突破 base 上限（soft cap = hard + 3）
+        3. 按剩余组数保底，确保不会在做完前就停止
+        """
+        hard_limit = getattr(config, 'MAX_ROUNDS_HARD', 15)
+
+        # 方案 1: 基础估算（受硬上限限制）
+        base = min(self._estimate_from_spec(), hard_limit)
+
+        # 方案 2: 动态调整（runtime 奖励可突破 base，但受 soft cap 限制）
         runtime_adjust = self._runtime_adjustment()
         strategy_adjust = self._strategy_adjustment()
 
-        max_rounds = min(base + runtime_adjust + strategy_adjust, getattr(config, 'MAX_ROUNDS_HARD', 10))
+        # 方案 3: 按剩余组数保底
+        remaining_estimate = 0
+        if self.feature_groups:
+            total_groups = len(self.feature_groups.group_ids)
+            completed = sum(
+                1 for gid in self.feature_groups.group_ids
+                if self.feature_groups.pass_rates.get(gid, 0.0) >= _get_group_threshold(gid)
+            )
+            remaining = total_groups - completed
+            # 已跑轮数 + 剩余组数 + 2轮缓冲（给Reviewer测试和Bug修复留空间）
+            remaining_estimate = self._completed_rounds + remaining + 2
+
+        # 融合计算
+        max_rounds = base + runtime_adjust + strategy_adjust
+        max_rounds = max(max_rounds, remaining_estimate)   # 保底：至少够做完剩余组
+        max_rounds = min(max_rounds, hard_limit + 3)       # soft cap: 硬上限+3轮奖励空间
         max_rounds = max(max_rounds, getattr(config, 'MIN_ROUNDS', 3))
 
-        self.log.info(f"[dynamic_rounds] base={base}, runtime={runtime_adjust}, "
-                      f"strategy={strategy_adjust} -> max_rounds={max_rounds}")
+        self.log.info(
+            f"[dynamic_rounds] base={base}, runtime={runtime_adjust}, "
+            f"strategy={strategy_adjust}, remaining={remaining_estimate}, "
+            f"hard={hard_limit} -> max_rounds={max_rounds}"
+        )
         return max_rounds
 
     def _estimate_from_spec(self) -> int:
@@ -1026,10 +1061,18 @@ class Harness:
                 return 2
 
         # 信号 B：连续停滞（Contract 几乎不变）-> 缩减，逼迫 PIVOT
+        # FIX: 只有当当前功能组真正 stuck 时才缩减。避免把"连续通过不同组"
+        # （contract_rate 都是 100%）误判为停滞。
         if len(self.contract_pass_rate_history) >= 3:
             last_three = self.contract_pass_rate_history[-3:]
             if max(last_three) - min(last_three) < 0.05:  # 5 percentage points
-                return -1
+                if self.feature_groups:
+                    current_gid = self.feature_groups.current_group_id
+                    stuck_count = self.feature_groups.stuck_counts.get(current_gid, 0)
+                    if stuck_count >= 2:
+                        return -1
+                else:
+                    return -1
 
         # 信号 C：Contract 持续上升且已接近门槛 -> 追加 1 轮冲刺
         if self.contract_pass_rate_history and self.contract_pass_rate_history[-1] >= 0.60:

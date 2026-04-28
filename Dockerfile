@@ -1,6 +1,8 @@
 # Use official Python slim image as base.
 # We install Node.js and Playwright manually to control versions precisely.
-FROM python:3.12-slim
+# Fallback to Aliyun mirror for regions where Docker Hub is unreachable.
+ARG PYTHON_IMAGE=docker.io/library/python:3.12-slim
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /app
 
@@ -37,19 +39,19 @@ RUN mkdir -p /templates && cd /templates && \
 
 # --- Pre-install Playwright MCP and browser ---
 # This avoids runtime npx download delays and timeouts
-# Create a dummy project so 'npx playwright install' runs after dependencies exist
+# MCP requires chrome-for-testing, not plain chromium.
 RUN mkdir -p /playwright-setup && cd /playwright-setup && \
     npm init -y && \
     npm install @playwright/mcp@latest && \
-    npx playwright install chromium
+    npx @playwright/mcp install-browser chrome-for-testing
 
 # --- Python packages ---
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Playwright system dependencies ---
-# --with-deps installs all required OS-level libraries for Chromium.
-RUN playwright install-deps chromium
+# Use the same npm playwright as MCP to ensure version consistency.
+RUN cd /playwright-setup && npx playwright install-deps chromium
 
 # --- Project source ---
 COPY *.py ./

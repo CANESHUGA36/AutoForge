@@ -1,6 +1,7 @@
 services:
   autoforge:
     build: .
+    image: autoforge:latest
     # Loads OPENAI_API_KEY, OPENAI_BASE_URL, HARNESS_MODEL, etc. from .env file
     env_file: .env
     environment:
@@ -10,5 +11,10 @@ services:
       # Host ./projects  <->  Container /projects
       # All generated apps appear in ./projects/ on your Windows machine.
       - ./projects:/projects
+      # Prompts & skills mounted live so edits take effect without rebuilding the image
+      - ./prompts:/app/prompts:ro
+      - ./skills:/app/skills:ro
+      - ./harness:/app/harness:ro
+      - ./config.py:/app/config.py:ro
     # Default command - override with: docker compose run autoforge python run.py "your prompt"
     command: ["python", "run.py"]

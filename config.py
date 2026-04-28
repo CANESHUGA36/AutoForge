@@ -32,14 +32,14 @@ MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "") or API_KEY
 BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
 
-# Token 阈值
-COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", "80000"))
-RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "150000"))
+# Token 阈值 (200K context model — raise to keep more history before state injection)
+COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", "180000"))
+RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "200000"))
 
 # Harness 循环
 MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "0"))  # 0 = 动态计算
 MIN_ROUNDS = 3
-MAX_ROUNDS_HARD = 12
+MAX_ROUNDS_HARD = 15
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
 # 双轨评分 —— Sprint 过程门槛 + Overall 交付门槛
@@ -70,7 +70,7 @@ AGENT_ITERATION_LIMITS = {
     "architect": int(os.environ.get("MAX_ITERATIONS_ARCHITECT", "30")),
     "sprint_master": int(os.environ.get("MAX_ITERATIONS_SPRINT_MASTER", "15")),
     "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "50")),
-    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "30")),
+    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "40")),
     "judge": int(os.environ.get("MAX_ITERATIONS_JUDGE", "10")),
 }
 
