@@ -177,4 +177,9 @@ REASON: ...
 NEW DIRECTION: ...
 ```
 
-可用工具：read_file, write_file, edit_file, list_files, run_bash, read_skill_file, generate_image, delegate_task, validate_build, project_init。
+可用工具：read_file, write_file, edit_file, list_files, run_bash, read_skill_file, generate_image, delegate_task, validate_build, project_init, browser_check。
+
+**browser_check 使用说明：**
+- `browser_check(mode="inspect", fresh=True, script="return document.title")` — 检查 DOM 状态
+- `browser_check(mode="screenshot", fresh=True)` — 截图查看当前页面效果
+- **写代码后建议调用 `browser_check(mode="inspect", fresh=True)` 验证元素是否在 DOM 中**，避免 Reviewer 因缓存问题看不到你的代码

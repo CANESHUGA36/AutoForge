@@ -1217,17 +1217,48 @@ def browser_test(
             _kill_port(port)
         return f"[error] Browser test failed: {e}"
 
-def browser_evaluate(
-    script: str,
-    url: str | None = None,
+def browser_check(
+    url: str = "http://localhost:5173",
+    mode: str = "inspect",
     viewport: dict | None = None,
+    fresh: bool = False,
+    wait: int = 2,
+    actions: list | None = None,
+    script: str | None = None,
+    screenshot: bool = False,
 ) -> str:
-    """Execute JavaScript in browser using Playwright MCP."""
-    from tools.playwright_mcp import browser_evaluate_mcp
+    """Unified browser check using Playwright MCP.
+    
+    Modes:
+      - inspect: Execute JS script and return result (replaces browser_evaluate)
+      - interact: Execute action chain like clicks, fills, etc (replaces browser_test)
+      - screenshot: Take screenshot for visual verification
+    
+    Args:
+        url: Target URL
+        mode: "inspect" | "interact" | "screenshot"
+        viewport: {"width": int, "height": int}
+        fresh: True = clear all caches and force refresh
+        wait: Seconds to wait after navigation
+        actions: List of action dicts for interact mode
+        script: JS script for inspect mode
+        screenshot: Whether to take screenshot
+    """
+    from tools.playwright_mcp import browser_check as _browser_check
     try:
-        return browser_evaluate_mcp(script=script, url=url, viewport=viewport)
+        return _browser_check(
+            url=url,
+            mode=mode,
+            viewport=viewport,
+            fresh=fresh,
+            wait=wait,
+            actions=actions,
+            script=script,
+            screenshot=screenshot,
+            format="json",
+        )
     except Exception as e:
-        return f"[error] Browser evaluate failed: {e}"
+        return f"[error] Browser check failed: {e}"
 
 
 TOOL_SCHEMAS = [
@@ -1481,23 +1512,27 @@ BROWSER_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "browser_evaluate",
+            "name": "browser_check",
             "description": (
-                "Execute JavaScript in a headless browser and return the result. "
-                "Use for precise DOM inspection, element counting, style verification, "
-                "or any check that needs exact JS return values. "
-                "The browser opens, evaluates, and closes immediately."
+                "Unified browser interaction tool. Replaces browser_test and browser_evaluate. "
+                "Use mode='inspect' for DOM queries (like browser_evaluate). "
+                "Use mode='interact' for action chains (like browser_test). "
+                "Use mode='screenshot' for visual verification. "
+                "Always set fresh=True when verifying recent code changes to avoid Vite HMR cache issues."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "script": {
-                        "type": "string",
-                        "description": "JavaScript to execute. Use 'return' statement for values. Example: 'return document.querySelectorAll(\".card\").length'",
-                    },
                     "url": {
                         "type": "string",
-                        "description": "Optional: URL to navigate to before evaluation. If omitted, assumes dev server is running.",
+                        "description": "URL to navigate to. Default: http://localhost:5173",
+                        "default": "http://localhost:5173",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Mode: 'inspect' (JS eval), 'interact' (action chain), 'screenshot' (visual).",
+                        "enum": ["inspect", "interact", "screenshot"],
+                        "default": "inspect",
                     },
                     "viewport": {
                         "type": "object",
@@ -1507,8 +1542,30 @@ BROWSER_TOOL_SCHEMAS = [
                             "height": {"type": "integer"},
                         },
                     },
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "Clear all caches and force refresh. IMPORTANT: Set to True when verifying recent code changes to avoid stale Vite HMR cache.",
+                        "default": False,
+                    },
+                    "wait": {
+                        "type": "integer",
+                        "description": "Seconds to wait after navigation. Default: 2.",
+                        "default": 2,
+                    },
+                    "actions": {
+                        "type": "array",
+                        "description": "Action chain for mode='interact'. Each action: {type: 'click'|'fill'|'wait'|'scroll'|'evaluate', selector?, value?, delay?}",
+                    },
+                    "script": {
+                        "type": "string",
+                        "description": "JavaScript for mode='inspect'. Example: 'return document.querySelectorAll(\".card\").length'",
+                    },
+                    "screenshot": {
+                        "type": "boolean",
+                        "description": "Take screenshot. Default: false.",
+                        "default": False,
+                    },
                 },
-                "required": ["script"],
             },
         },
     },
@@ -1580,7 +1637,7 @@ TOOL_DISPATCH = {
     "list_files": list_files,
     "run_bash": run_bash,
     "browser_test": browser_test,
-    "browser_evaluate": browser_evaluate,
+    "browser_check": browser_check,
     "read_skill_file": read_skill_file,
     "generate_image": generate_image,
     "start_dev_server": start_dev_server,

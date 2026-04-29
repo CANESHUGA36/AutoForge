@@ -37,9 +37,11 @@ Harness 会在你的任务提示中注入当前功能组 ID（如 F3）和对应
 - ❌ 不检查：上传按钮是否工作、播放控制是否存在、主题切换是否生效
 
 测试流程：
-1. 桌面端（1280×720）+ 移动端（375×812）各一次 `browser_test`
-2. 用 `browser_evaluate` 精确验证当前功能组的 DOM/Canvas 状态
+1. 桌面端（1280×720）+ 移动端（375×812）各一次 `browser_check(mode="interact", fresh=True)`
+2. 用 `browser_check(mode="inspect", fresh=True)` 精确验证当前功能组的 DOM/Canvas 状态
 3. 如果当前功能组需要音频文件才能显示（如波形），请确认：**无音频时隐藏是设计意图，不是 bug**
+
+**重要：所有浏览器测试必须设置 `fresh=True` 以避免 Vite HMR 缓存导致的 DOM 与源码不一致问题。**
 
 ## 条件渲染功能测试策略（强制——必须执行）
 
@@ -60,7 +62,7 @@ return { found: !!el, display: el ? getComputedStyle(el).display : null };
 如果找到但 `display === 'none'`，说明元素存在只是被 CSS 隐藏 → **进入 Step 2**。
 
 ### 强制 Step 2: 触发状态变化验证
-用 `browser_evaluate` 模拟事件或修改状态，让组件进入目标状态：
+用 `browser_check(mode="inspect", fresh=True)` 模拟事件或修改状态，让组件进入目标状态：
 
 ```javascript
 // 错误状态测试（F1.10 等）
@@ -135,10 +137,10 @@ return { hasError: !!overlay, errorText: overlay?.textContent?.substring(0, 200)
 
 **Step 3: 强制硬刷新页面**
 ```javascript
-// 硬刷新，绕过浏览器缓存
-window.location.href = 'http://localhost:5173?_nocache=' + Date.now();
+// 使用 browser_check fresh=True 模式，自动清除所有缓存并硬刷新
+// 这会清理 node_modules/.vite、.vite/、dist/ 和浏览器缓存
 ```
-等待 3 秒后重新检查 DOM。
+调用 `browser_check(mode="inspect", url="http://localhost:5173", fresh=True, wait=3, script="...")`
 - 如果元素出现 → **PASS**（缓存问题已解决）
 - 如果仍然不存在 → 继续 Step 4
 
@@ -158,7 +160,8 @@ return {
 如果执行到这一步，**源码存在 + 无编译错误 + 硬刷新无效 + root HTML 中完全没有目标元素**，执行以下最终测试：
 
 **Step 5a: 彻底重启 dev server**
-调用 `start_dev_server(command="rm -rf node_modules/.vite dist .vite && npm run dev", port=5173, wait=15)` 完全清理缓存并重启。等待 15 秒后再次检查 DOM。
+调用 `start_dev_server(command="rm -rf node_modules/.vite dist .vite && npm run dev", port=5173, wait=15)` 完全清理缓存并重启。
+然后调用 `browser_check(mode="inspect", fresh=True, wait=3, script="...")` 重新验证。等待 15 秒后再次检查 DOM。
 
 **Step 5b: 重启后再次验证**
 ```javascript

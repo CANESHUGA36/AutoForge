@@ -1,17 +1,49 @@
 """
-Playwright MCP Bridge — 将现有 browser_test/browser_evaluate 接口映射到 Playwright MCP tools
+Playwright MCP Bridge — Unified Browser Interaction Layer
 
-使用 MCP (Model Context Protocol) 与 Playwright MCP Server 通信，替代内嵌的 sync_playwright。
+Architecture:
+  ┌─────────────────────────────────────────────┐
+  │           BrowserSessionPool (Singleton)     │
+  │  ┌─────────────┐  ┌─────────────┐          │
+  │  │ Session #1  │  │ Session #2  │  ...     │
+  │  │ (desktop)   │  │ (mobile)    │          │
+  │  │ MCP Server  │  │ MCP Server  │          │
+  │  │ + Chrome    │  │ + Chrome    │          │
+  │  └─────────────┘  └─────────────┘          │
+  └─────────────────────────────────────────────┘
+                    │
+                    ▼
+  ┌─────────────────────────────────────────────┐
+  │           CacheManager                       │
+  │  - Vite Server Cache (node_modules/.vite)   │
+  │  - Vite Module Graph (.vite/)               │
+  │  - Build Output (dist/)                     │
+  │  - Browser HTTP Cache                       │
+  │  - Service Worker Cache                     │
+  └─────────────────────────────────────────────┘
+                    │
+                    ▼
+  ┌─────────────────────────────────────────────┐
+  │           browser_check()                    │
+  │  Single entry point, unified behavior        │
+  └─────────────────────────────────────────────┘
+
+Modes:
+  - inspect:   DOM query, state check (script-based)
+  - interact:  Click, type, scroll (action chain)
+  - screenshot: Visual verification
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import shutil
 import sys
 import time
-from contextlib import asynccontextmanager
+import weakref
 from pathlib import Path
+from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -20,97 +52,116 @@ import config
 
 log = logging.getLogger("harness")
 
-# Python 3.11+ BaseExceptionGroup compatibility — MCP SDK's stdio_client cleanup
-# may throw BaseExceptionGroup (from anyio TaskGroup) which is NOT an Exception subclass.
+# Python 3.11+ BaseExceptionGroup compatibility
 try:
     _CLEANUP_EXC_TYPES: tuple = (Exception, BaseExceptionGroup)
-except NameError:  # pragma: no cover  (< Python 3.11)
+except NameError:
     _CLEANUP_EXC_TYPES = (Exception,)
 
 
-def _wrap_script(script: str) -> str:
-    """Wrap a raw JS expression into a serializable function for Playwright MCP.
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. CacheManager — 统一缓存处理
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Playwright MCP's browser_evaluate tool requires the 'function' argument
-    to be a complete, serializable JavaScript function. Many agents pass
-    bare expressions like 'return document.title', which fail with
-    'Passed function is not well-serializable!'.
+class CacheManager:
+    """管理所有与浏览器测试相关的缓存。"""
 
-    Rules:
-    - Complete function declarations / arrow functions are passed through.
-    - Scripts containing 'await' are wrapped in an async arrow function.
-    - Scripts starting with 'return' keep the return statement.
-    - Multi-line scripts are wrapped in braces.
-    - Simple expressions get an automatic 'return'.
-    - Single-line scripts with statement-level syntax (var/let/const/function/
-      for/if/while/try/switch/class) are wrapped WITHOUT adding 'return',
-      because 'return var x = 1' is a syntax error.
-    """
-    s = script.strip()
+    @staticmethod
+    def clear_vite_server_caches() -> None:
+        """清除 Vite 服务端缓存（构建输出 + 模块图 + 预构建依赖）。"""
+        ws = Path(config.WORKSPACE)
+        cleared = []
 
-    # Already a complete function declaration → pass through
-    if s.startswith("function ") or s.startswith("async function "):
-        return s
+        # 1. Vite 预构建依赖缓存
+        for cache_dir in (ws / "node_modules" / ".vite", ws / ".vite"):
+            if cache_dir.exists():
+                try:
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                    cleared.append(str(cache_dir))
+                except Exception:
+                    pass
 
-    # Already a parenthesized arrow function expression → pass through
-    # Covers: () => ..., (x) => ..., (x, y) => ...
-    if s.startswith("("):
-        return s
+        # 2. 生产构建输出
+        dist_dir = ws / "dist"
+        if dist_dir.exists():
+            try:
+                shutil.rmtree(dist_dir, ignore_errors=True)
+                cleared.append("dist/")
+            except Exception:
+                pass
 
-    # Already an async arrow function or async expression → pass through
-    if s.startswith("async "):
-        return s
+        # 3. Next.js 缓存（如果存在）
+        for cache_dir in (ws / ".next" / "cache", ws / ".next" / "turbopack"):
+            if cache_dir.exists():
+                try:
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                    cleared.append(str(cache_dir))
+                except Exception:
+                    pass
 
-    # Detect if script uses await (needs async wrapper)
-    needs_async = "await " in s
+        # 4. 触发文件系统事件，强制 Vite 重新扫描
+        for entry in (ws / "src" / "main.tsx", ws / "src" / "main.jsx",
+                      ws / "src" / "index.tsx", ws / "src" / "App.tsx"):
+            if entry.exists():
+                try:
+                    entry.touch(exist_ok=True)
+                except Exception:
+                    pass
 
-    # Script starts with 'return' → wrap as-is (keep the return statement)
-    if s.startswith("return "):
-        if needs_async:
-            return f"async () => {{ {s} }}"
-        return f"() => {{ {s} }}"
+        if cleared:
+            log.info(f"[CacheManager] Cleared: {', '.join(cleared)}")
 
-    # Multi-line script → wrap in braces without adding return
-    if "\n" in s:
-        if needs_async:
-            return f"async () => {{ {s} }}"
-        return f"() => {{ {s} }}"
+    @staticmethod
+    async def clear_browser_caches(session: ClientSession) -> None:
+        """通过 MCP 清除浏览器端缓存。"""
+        try:
+            # 清除 Service Worker / Cache API 缓存
+            await session.call_tool("browser_evaluate", {
+                "function": """() => {
+                    try {
+                        if ('caches' in window) {
+                            caches.keys().then(ks => ks.forEach(k => caches.delete(k)));
+                        }
+                        // 清除 localStorage 中可能的 Vite HMR 状态
+                        const viteKeys = Object.keys(localStorage).filter(k => k.includes('vite'));
+                        viteKeys.forEach(k => localStorage.removeItem(k));
+                        return 'browser_cache_cleared';
+                    } catch(e) {
+                        return 'clear_failed: ' + e.message;
+                    }
+                }"""
+            })
+        except Exception as e:
+            log.debug(f"[CacheManager] Browser cache clear skipped: {e}")
 
-    # Single-line script: check for statement-level keywords that would
-    # create a syntax error if we prepend 'return'.
-    # e.g. "var s = ...; return s.length" → "return var s = ..." is INVALID.
-    _STATEMENT_KEYWORDS = (
-        "var ", "let ", "const ", "function ", "if ", "for ", "while ",
-        "try ", "switch ", "class ", "do ", "with ", "throw ",
-    )
-    if any(s.startswith(kw) for kw in _STATEMENT_KEYWORDS):
-        if needs_async:
-            return f"async () => {{ {s} }}"
-        return f"() => {{ {s} }}"
-
-    # Simple expression → wrap with implicit return
-    if needs_async:
-        return f"async () => {{ return {s}; }}"
-    return f"() => {{ return {s}; }}"
+    @staticmethod
+    def add_cache_buster(url: str) -> str:
+        """为 URL 添加时间戳参数，防止 HTTP 缓存。"""
+        timestamp = int(time.time())
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}_t={timestamp}"
 
 
-class PlaywrightMCPBridge:
-    """封装 Playwright MCP 调用，提供与现有 browser_test/browser_evaluate 兼容的接口。"""
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. BrowserSession — 单个浏览器会话封装
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def __init__(self):
+class BrowserSession:
+    """封装单个 Playwright MCP Session（包含 MCP Server + Chrome + Page）。"""
+
+    def __init__(self, viewport: dict | None = None):
+        self.viewport = viewport or {"width": 1280, "height": 720}
         self._session: ClientSession | None = None
         self._client_ctx = None
         self._read = None
         self._write = None
+        self._current_url: str | None = None
+        self._initialized = False
 
-    async def start(self):
-        """显式启动 bridge（Pool 管理时使用）"""
-        await self._ensure_session()
-
-    async def _ensure_session(self) -> ClientSession:
-        """确保 MCP session 已建立。"""
-        if self._session is not None:
-            return self._session
+    async def start(self) -> None:
+        """启动 MCP Session 和浏览器。"""
+        if self._initialized:
+            return
 
         params = StdioServerParameters(
             command="npx",
@@ -121,266 +172,141 @@ class PlaywrightMCPBridge:
                 "--console-level", "error",
             ],
         )
+
         self._client_ctx = stdio_client(params)
         try:
             self._read, self._write = await self._client_ctx.__aenter__()
             self._session = ClientSession(self._read, self._write)
-            try:
-                await self._session.__aenter__()
-                await self._session.initialize()
-                return self._session
-            except Exception:
-                # Session enter failed; clean up client context
-                await self._client_ctx.__aexit__(*sys.exc_info())
-                self._client_ctx = None
-                self._session = None
-                raise
+            await self._session.__aenter__()
+            await self._session.initialize()
+
+            # 设置 viewport
+            await self._call_tool("browser_resize", {
+                "width": self.viewport["width"],
+                "height": self.viewport["height"],
+            })
+
+            self._initialized = True
+            log.info(f"[BrowserSession] Started with viewport {self.viewport['width']}x{self.viewport['height']}")
+
         except Exception:
-            # Client context enter failed; nothing to clean up yet
-            self._client_ctx = None
+            await self._cleanup_on_error()
             raise
 
     async def close(self) -> None:
-        """关闭 MCP session 和浏览器进程。"""
+        """关闭浏览器和 MCP Session。"""
         if self._session is not None:
-            # FIX: Remove browser_close tool call — session.__aexit__ handles cleanup.
-            # Calling browser_close may kill the MCP Server process prematurely.
             try:
                 await self._session.__aexit__(None, None, None)
+            except _CLEANUP_EXC_TYPES:
+                pass
             except Exception:
                 pass
             self._session = None
 
         if self._client_ctx is not None:
             try:
-                # Use __aexit__ (symmetric with __aenter__) instead of aclose()
-                # to avoid anyio CancelScope race during asyncio.run() shutdown.
                 await self._client_ctx.__aexit__(None, None, None)
             except _CLEANUP_EXC_TYPES:
-                # Suppress known MCP SDK cleanup race (BaseExceptionGroup from
-                # anyio TaskGroup during async generator shutdown).
+                pass
+            except Exception:
+                pass
+            self._client_ctx = None
+
+        self._initialized = False
+        log.info("[BrowserSession] Closed")
+
+    async def _cleanup_on_error(self) -> None:
+        """初始化失败时的清理。"""
+        if self._session is not None:
+            try:
+                await self._session.__aexit__(*sys.exc_info())
+            except _CLEANUP_EXC_TYPES:
+                pass
+            except Exception:
+                pass
+            self._session = None
+
+        if self._client_ctx is not None:
+            try:
+                await self._client_ctx.__aexit__(*sys.exc_info())
+            except _CLEANUP_EXC_TYPES:
+                pass
+            except Exception:
                 pass
             self._client_ctx = None
 
     async def _call_tool(self, name: str, arguments: dict) -> str:
-        """调用 MCP tool 并返回文本结果。"""
-        session = await self._ensure_session()
-        result = await session.call_tool(name, arguments)
+        """调用 MCP tool。"""
+        if not self._session:
+            raise RuntimeError("BrowserSession not initialized")
+        result = await self._session.call_tool(name, arguments)
         if result.content:
             return "\n".join(c.text for c in result.content if hasattr(c, "text"))
         return ""
 
-    # ------------------------------------------------------------------ #
-    #  browser_test 兼容接口                                             #
-    # ------------------------------------------------------------------ #
+    async def navigate(self, url: str, fresh: bool = False, wait: int = 2) -> dict:
+        """导航到 URL，返回页面基本信息。"""
+        if fresh:
+            url = CacheManager.add_cache_buster(url)
 
-    async def browser_test(
-        self,
-        url: str,
-        actions: list | None = None,
-        screenshot: bool = True,
-        viewport: dict | None = None,
-    ) -> str:
-        """与现有 browser_test 接口兼容的实现。
+        nav_result = await self._call_tool("browser_navigate", {"url": url})
+        self._current_url = url
 
-        内部使用 Playwright MCP tools:
-        - browser_navigate
-        - browser_resize
-        - browser_click / browser_type / browser_evaluate
-        - browser_wait_for
-        - browser_console_messages
-        - browser_snapshot
-        - browser_take_screenshot
-        """
-        report_lines: list[str] = []
+        # 提取标题
+        title = self._extract_title(nav_result)
 
-        vp = viewport if isinstance(viewport, dict) else {"width": 1280, "height": 720}
-        report_lines.append(f"Viewport: {vp['width']}x{vp['height']}")
+        # 等待页面加载
+        await asyncio.sleep(wait)
 
-        try:
-            # 1. 设置 viewport
-            await self._call_tool("browser_resize", {
-                "width": vp["width"],
-                "height": vp["height"],
+        # 如果是 fresh 模式，再次导航确保完全刷新
+        if fresh:
+            await self._call_tool("browser_navigate", {"url": url})
+            await asyncio.sleep(1)
+            title2 = await self._call_tool("browser_evaluate", {
+                "function": "() => document.title"
             })
+            title = self._extract_eval_result(title2) or title
 
-            # 2. 导航（带 cache-busting 防止浏览器缓存旧版本）
-            cache_bust_url = f"{url}{'&' if '?' in url else '?'}_t={int(time.time())}"
-            nav_result = await self._call_tool("browser_navigate", {"url": cache_bust_url})
-            # 从 MCP 结果中提取标题
-            title = self._extract_title(nav_result)
-            report_lines.append(f"Navigated to {cache_bust_url} — title: {title}")
+        return {"url": url, "title": title}
 
-            # 2.3 FIX: Clear browser caches to prevent stale content from previous tests
-            try:
-                await self._call_tool("browser_evaluate", {
-                    "function": "() => { try { caches.keys().then(ks => ks.forEach(k => caches.delete(k))); } catch(e) {} return 'cache_cleared'; }"
-                })
-            except Exception:
-                pass
+    async def execute_script(self, script: str) -> Any:
+        """执行 JavaScript 并返回结果。"""
+        wrapped = _wrap_script(script)
+        result = await self._call_tool("browser_evaluate", {"function": wrapped})
+        return self._extract_eval_result(result)
 
-            # 2.5 FIX: Wait longer for Vite/React apps to fully compile and hydrate
-            # Vite HMR may need extra time after dev server restart
-            await asyncio.sleep(3)
+    async def take_screenshot(self, filename: str | None = None) -> str:
+        """截图并返回文件路径。"""
+        if not filename:
+            vp = self.viewport
+            filename = f"_screenshot_{vp['width']}x{vp['height']}.png"
+        await self._call_tool("browser_take_screenshot", {"filename": filename})
+        return filename
 
-            # 2.6 FIX: Re-navigate to force fresh load (some headless browsers cache modules)
-            try:
-                await self._call_tool("browser_navigate", {"url": cache_bust_url})
-                await asyncio.sleep(2)
-                title2 = self._extract_title(await self._call_tool("browser_evaluate", {
-                    "function": "() => document.title"
-                }))
-                if title2:
-                    report_lines.append(f"Fresh load complete — title: {title2}")
-            except Exception as e:
-                report_lines.append(f"[warn] Fresh reload skipped: {e}")
+    async def get_snapshot(self) -> str:
+        """获取页面可访问性快照。"""
+        return await self._call_tool("browser_snapshot", {})
 
-            # 3. 执行 actions
-            for action in (actions or []):
-                action_type = action.get("type", "")
-                selector = action.get("selector", "")
-                value = action.get("value", "")
-                delay = action.get("delay", 1000)
+    async def get_console_errors(self) -> list[str]:
+        """获取控制台错误。"""
+        result = await self._call_tool("browser_console_messages", {"level": "error"})
+        errors = []
+        for line in result.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and not line.startswith("-"):
+                errors.append(line)
+        return errors
 
-                try:
-                    if action_type == "click":
-                        snapshot = await self._call_tool("browser_snapshot", {})
-                        ref = self._find_ref_by_selector(snapshot, selector)
-                        if ref:
-                            await self._call_tool("browser_click", {"ref": ref})
-                            report_lines.append(f"Clicked: {selector}")
-                        else:
-                            report_lines.append(f"[error] click: Element not found: {selector}")
-
-                    elif action_type == "fill":
-                        snapshot = await self._call_tool("browser_snapshot", {})
-                        ref = self._find_ref_by_selector(snapshot, selector)
-                        if ref:
-                            await self._call_tool("browser_type", {"ref": ref, "text": value})
-                            report_lines.append(f"Filled '{selector}'")
-                        else:
-                            report_lines.append(f"[error] fill: Element not found: {selector}")
-
-                    elif action_type == "evaluate":
-                        wrapped = _wrap_script(value)
-                        result = await self._call_tool("browser_evaluate", {"function": wrapped})
-                        # 提取结果部分
-                        eval_text = self._extract_eval_result(result)
-                        report_lines.append(f"JS eval: {eval_text[:500]}")
-
-                    elif action_type == "wait":
-                        await self._call_tool("browser_wait_for", {"time": delay / 1000})
-
-                    elif action_type == "scroll":
-                        scroll_amount = value if value else 500
-                        await self._call_tool("browser_evaluate", {
-                            "function": f"() => window.scrollBy(0, {scroll_amount})"
-                        })
-
-                except Exception as e:
-                    report_lines.append(f"[error] {action_type}: {e}")
-
-                # 每个 action 后短暂等待
-                await asyncio.sleep(0.3)
-
-            # 4. 获取当前 URL
-            snapshot = await self._call_tool("browser_snapshot", {})
-            current_url = self._extract_url(snapshot)
-            report_lines.append(f"Final URL: {current_url}")
-
-            # 5. 获取可见文本
-            visible_text = self._extract_visible_text(snapshot)
-            report_lines.append(f"Visible text: {visible_text[:2000]}")
-
-            # 6. 控制台错误
-            console_result = await self._call_tool("browser_console_messages", {"level": "error"})
-            console_errors = self._parse_console_errors(console_result)
-            if console_errors:
-                report_lines.append(f"Console errors ({len(console_errors)}):")
-                for err in console_errors[:10]:
-                    report_lines.append(f"  - {err[:200]}")
-
-            # 7. 截图
-            if screenshot:
-                ss_name = f"_screenshot_{vp['width']}x{vp['height']}.png"
-                await self._call_tool("browser_take_screenshot", {"filename": str(ss_name)})
-                report_lines.append(f"Screenshot saved to {ss_name}")
-
-        except Exception as e:
-            report_lines.append(f"[error] Browser test failed: {e}")
-
-        return "\n".join(report_lines)
-
-    # ------------------------------------------------------------------ #
-    #  browser_evaluate 兼容接口                                         #
-    # ------------------------------------------------------------------ #
-
-    async def browser_evaluate(
-        self,
-        script: str,
-        url: str | None = None,
-        viewport: dict | None = None,
-    ) -> str:
-        """与现有 browser_evaluate 接口兼容的实现。"""
-        try:
-            vp = viewport if isinstance(viewport, dict) else {"width": 1280, "height": 720}
-
-            # 设置 viewport
-            await self._call_tool("browser_resize", {
-                "width": vp["width"],
-                "height": vp["height"],
-            })
-
-            # 导航（如果提供了 URL）
-            if url:
-                nav_result = await self._call_tool("browser_navigate", {"url": url})
-                if "Error" in nav_result:
-                    return f"[error] Navigation failed: {nav_result}"
-                # 等待页面 hydrate 完成（Next.js / React 应用需要）
-                await asyncio.sleep(2)
-
-            # 执行脚本 — Playwright MCP 要求 function 是完整可序列化的函数
-            wrapped = _wrap_script(script)
-            result = await self._call_tool("browser_evaluate", {"function": wrapped})
-            eval_text = self._extract_eval_result(result)
-            return f"Result: {eval_text}"
-
-        except Exception as e:
-            return f"[error] Script execution failed: {e}"
-
-    # ------------------------------------------------------------------ #
-    #  结果解析辅助方法                                                   #
-    # ------------------------------------------------------------------ #
+    # ── 辅助方法 ──
 
     def _extract_title(self, nav_result: str) -> str:
-        """从 browser_navigate 结果中提取页面标题。"""
         for line in nav_result.splitlines():
             if "- Page Title:" in line:
                 return line.split("- Page Title:", 1)[1].strip()
         return "N/A"
 
-    def _extract_url(self, snapshot: str) -> str:
-        """从 snapshot 结果中提取 URL。"""
-        for line in snapshot.splitlines():
-            if "- Page URL:" in line:
-                return line.split("- Page URL:", 1)[1].strip()
-        return "N/A"
-
-    def _extract_visible_text(self, snapshot: str) -> str:
-        """从 accessibility snapshot 中提取可见文本。"""
-        lines = []
-        for line in snapshot.splitlines():
-            # 跳过 markdown 标题和元数据行
-            if line.startswith("#") or line.startswith("-") or line.startswith("["):
-                continue
-            stripped = line.strip()
-            if stripped:
-                lines.append(stripped)
-        return " ".join(lines)
-
-    def _extract_eval_result(self, eval_result: str) -> str:
-        """从 browser_evaluate 结果中提取返回值。"""
-        # MCP 返回格式: ### Result\n"value"\n### Ran Playwright code...
+    def _extract_eval_result(self, eval_result: str) -> Any:
         lines = eval_result.splitlines()
         in_result = False
         result_lines = []
@@ -392,75 +318,398 @@ class PlaywrightMCPBridge:
                 break
             if in_result:
                 result_lines.append(line)
-        return "\n".join(result_lines).strip() or eval_result[:500]
+        text = "\n".join(result_lines).strip()
 
-    def _parse_console_errors(self, console_result: str) -> list[str]:
-        """解析控制台错误消息。"""
-        errors = []
-        for line in console_result.splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("-"):
-                errors.append(line)
-        return errors
-
-    def _find_ref_by_selector(self, snapshot: str, selector: str) -> str | None:
-        """在 accessibility snapshot 中通过 selector 查找元素的 ref。
-
-        解析 MCP browser_snapshot 返回的 markdown 格式，提取 ref 值。
-        Snapshot 格式示例:
-            - heading "Title" [ref=s1e2]
-            - button "Click me" [ref=s1e3]
-            - link "About" [ref=s1e4]
-        """
-        import re
-
-        if not selector or not snapshot:
-            return None
-
-        # 提取 selector 中的关键文本（去除 CSS 前缀）
-        search_text = selector.strip()
-        # 去除常见的 CSS 前缀: #id, .class, [attr], tagname
-        for prefix in ("#", ".", "[", "]"):
-            search_text = search_text.replace(prefix, " ")
-        search_text = search_text.strip().lower()
-
-        if not search_text:
-            return None
-
-        # 解析 snapshot 中的每一行，查找 ref 和文本
-        # 格式: - tag "text" [ref=xxx] 或 [ref=xxx] text
-        ref_pattern = re.compile(r'\[ref=([^\]]+)\]')
-
-        candidates = []
-        for line in snapshot.splitlines():
-            line_lower = line.lower()
-            ref_match = ref_pattern.search(line)
-            if not ref_match:
-                continue
-
-            ref = ref_match.group(1)
-            # 移除 ref 部分，保留其余文本用于匹配
-            text_without_ref = ref_pattern.sub('', line).lower()
-
-            # 匹配策略：精确匹配 > 包含匹配 > 部分词匹配
-            if search_text in text_without_ref:
-                # 计算匹配质量：越短的行匹配越精确
-                quality = len(text_without_ref) - len(search_text)
-                candidates.append((quality, ref, line.strip()))
-
-        if candidates:
-            # 选择最精确的匹配（质量值最小）
-            candidates.sort(key=lambda x: x[0])
-            _, best_ref, matched_line = candidates[0]
-            log.debug(f"[playwright_mcp] Selector '{selector}' matched ref={best_ref} in line: {matched_line[:100]}")
-            return best_ref
-
-        return None
+        # 尝试解析为 JSON
+        if text:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return text
+        return eval_result[:500]
 
 
-# ---------------------------------------------------------------------- #
-#  同步包装函数（供现有代码调用）                                         #
-# ---------------------------------------------------------------------- #
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. BrowserSessionPool — 会话池管理
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BrowserSessionPool:
+    """管理多个 BrowserSession，按 viewport 复用。
+    
+    ⚠️ 重要：由于 MCP stdio_client 不能跨 asyncio 事件循环复用，
+    每次 browser_check 在新线程中运行时，Session 会被自动重建。
+    同一线程/事件循环内的多次调用可以复用 Session。
+    """
+
+    _instance: BrowserSessionPool | None = None
+    _lock = asyncio.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._sessions: dict[str, BrowserSession] = {}
+            cls._instance._closed = False
+        return cls._instance
+
+    def _make_key(self, viewport: dict) -> str:
+        return f"{viewport.get('width', 1280)}x{viewport.get('height', 720)}"
+
+    async def get_session(self, viewport: dict | None = None) -> BrowserSession:
+        """获取或创建指定 viewport 的 Session。"""
+        vp = viewport or {"width": 1280, "height": 720}
+        key = self._make_key(vp)
+
+        # 检查现有 Session 是否仍然可用（同事件循环）
+        if key in self._sessions:
+            session = self._sessions[key]
+            try:
+                # 快速健康检查
+                await session._session.call_tool("browser_evaluate", {
+                    "function": "() => 'ping'"
+                })
+                return session
+            except Exception:
+                # Session 已损坏（跨事件循环或连接断开），移除并重建
+                log.debug(f"[SessionPool] Session {key} stale, recreating")
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+                del self._sessions[key]
+
+        # 创建新 Session
+        session = BrowserSession(vp)
+        await session.start()
+        self._sessions[key] = session
+        log.info(f"[SessionPool] Created session for {key}")
+        return session
+
+    async def close_all(self) -> None:
+        """关闭所有 Session。"""
+        for key, session in list(self._sessions.items()):
+            try:
+                await session.close()
+            except _CLEANUP_EXC_TYPES:
+                pass
+            except Exception as e:
+                log.warning(f"[SessionPool] Error closing session {key}: {e}")
+        self._sessions.clear()
+        self._closed = True
+        BrowserSessionPool._instance = None
+        log.info("[SessionPool] All sessions closed")
+
+    async def invalidate_caches(self) -> None:
+        """清除服务端缓存 + 所有浏览器端缓存。"""
+        # 1. 服务端缓存
+        CacheManager.clear_vite_server_caches()
+
+        # 2. 浏览器端缓存
+        for session in self._sessions.values():
+            try:
+                await CacheManager.clear_browser_caches(session._session)
+            except Exception as e:
+                log.debug(f"[SessionPool] Cache clear skipped: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. _wrap_script — 脚本包装（保持不变）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _wrap_script(script: str) -> str:
+    """将原始 JS 表达式包装为 Playwright MCP 可序列化的函数。"""
+    s = script.strip()
+
+    if s.startswith("function ") or s.startswith("async function "):
+        return s
+    if s.startswith("("):
+        return s
+    if s.startswith("async "):
+        return s
+
+    needs_async = "await " in s
+
+    if s.startswith("return "):
+        if needs_async:
+            return f"async () => {{ {s} }}"
+        return f"() => {{ {s} }}"
+
+    if "\n" in s:
+        if needs_async:
+            return f"async () => {{ {s} }}"
+        return f"() => {{ {s} }}"
+
+    _STATEMENT_KEYWORDS = (
+        "var ", "let ", "const ", "function ", "if ", "for ", "while ",
+        "try ", "switch ", "class ", "do ", "with ", "throw ",
+    )
+    if any(s.startswith(kw) for kw in _STATEMENT_KEYWORDS):
+        if needs_async:
+            return f"async () => {{ {s} }}"
+        return f"() => {{ {s} }}"
+
+    if needs_async:
+        return f"async () => {{ return {s}; }}"
+    return f"() => {{ return {s}; }}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. browser_check — 统一的浏览器交互入口
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _browser_check_async(
+    url: str = "http://localhost:5173",
+    mode: str = "inspect",
+    viewport: dict | None = None,
+    fresh: bool = False,
+    wait: int = 2,
+    actions: list | None = None,
+    script: str | None = None,
+    screenshot: bool = False,
+    format: str = "json",
+) -> dict | str:
+    """
+    统一的浏览器交互入口。
+
+    Args:
+        url: 目标 URL
+        mode: "inspect" | "interact" | "screenshot"
+        viewport: {"width": int, "height": int}
+        fresh: True = 强制清除所有缓存并刷新
+        wait: 页面加载后等待秒数
+        actions: 交互动作列表（mode="interact" 时使用）
+        script: JS 脚本（mode="inspect" 时使用）
+        screenshot: 是否截图
+        format: "json" | "text"
+
+    Returns:
+        结构化结果（dict）或文本报告（str）
+    """
+    pool = BrowserSessionPool()
+    session = await pool.get_session(viewport)
+    result: dict[str, Any] = {
+        "mode": mode,
+        "viewport": session.viewport,
+        "timestamp": int(time.time()),
+    }
+
+    try:
+        # ── Step 1: 缓存处理 ──
+        if fresh:
+            await pool.invalidate_caches()
+            wait = max(wait, 3)  # fresh 模式增加等待时间
+            log.info(f"[browser_check] Fresh mode: caches cleared, wait={wait}s")
+
+        # ── Step 2: 导航 ──
+        nav_info = await session.navigate(url, fresh=fresh, wait=wait)
+        result.update(nav_info)
+
+        # ── Step 3: 根据模式执行 ──
+        if mode == "inspect":
+            # 执行脚本并返回结果
+            if script:
+                try:
+                    eval_result = await session.execute_script(script)
+                    result["script_result"] = eval_result
+                except Exception as e:
+                    result["script_error"] = str(e)
+
+        elif mode == "interact":
+            # 执行 action 链
+            action_results = []
+            for action in (actions or []):
+                action_type = action.get("type", "")
+                action_result = {"type": action_type, "status": "ok"}
+
+                try:
+                    if action_type == "click":
+                        snapshot = await session.get_snapshot()
+                        ref = _find_ref_by_selector(snapshot, action.get("selector", ""))
+                        if ref:
+                            await session._call_tool("browser_click", {"ref": ref})
+                        else:
+                            action_result["status"] = "error"
+                            action_result["error"] = f"Element not found: {action.get('selector')}"
+
+                    elif action_type == "fill":
+                        snapshot = await session.get_snapshot()
+                        ref = _find_ref_by_selector(snapshot, action.get("selector", ""))
+                        if ref:
+                            await session._call_tool("browser_type", {
+                                "ref": ref,
+                                "text": action.get("value", "")
+                            })
+                        else:
+                            action_result["status"] = "error"
+                            action_result["error"] = f"Element not found: {action.get('selector')}"
+
+                    elif action_type == "wait":
+                        delay = action.get("delay", 1000) / 1000
+                        await asyncio.sleep(delay)
+
+                    elif action_type == "scroll":
+                        amount = action.get("value", 500)
+                        await session.execute_script(f"window.scrollBy(0, {amount})")
+
+                    elif action_type == "evaluate":
+                        eval_result = await session.execute_script(action.get("script", action.get("value", "")))
+                        action_result["result"] = eval_result
+
+                except Exception as e:
+                    action_result["status"] = "error"
+                    action_result["error"] = str(e)
+
+                action_results.append(action_result)
+                await asyncio.sleep(0.3)
+
+            result["actions"] = action_results
+
+        elif mode == "screenshot":
+            screenshot_file = await session.take_screenshot()
+            result["screenshot"] = screenshot_file
+
+        # ── Step 4: 获取控制台错误 ──
+        result["console_errors"] = await session.get_console_errors()
+
+        # ── Step 5: 截图（如果请求）──
+        if screenshot and mode != "screenshot":
+            screenshot_file = await session.take_screenshot()
+            result["screenshot"] = screenshot_file
+
+        # ── Step 6: 获取页面快照摘要 ──
+        try:
+            snapshot = await session.get_snapshot()
+            result["page_summary"] = _summarize_snapshot(snapshot)
+        except Exception:
+            pass
+
+    except Exception as e:
+        result["error"] = str(e)
+        log.error(f"[browser_check] Error: {e}")
+
+    # 返回格式
+    if format == "text":
+        return _format_result_as_text(result)
+    return result
+
+
+def _run_async_in_thread(coro) -> Any:
+    """在独立线程中运行 async coroutine，并抑制 MCP cleanup 的 stderr 噪音。"""
+    import concurrent.futures
+    import io
+    import sys
+
+    # 捕获 stderr 以过滤 MCP 的 cleanup race 噪音
+    old_stderr = sys.stderr
+    captured = io.StringIO()
+    sys.stderr = captured
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: asyncio.run(coro))
+            try:
+                return future.result(timeout=60)
+            except _CLEANUP_EXC_TYPES as e:
+                log.debug(f"[browser_check] suppressed cleanup race: {e}")
+                return {"error": "MCP connection cleanup race"}
+    finally:
+        sys.stderr = old_stderr
+        stderr_output = captured.getvalue()
+        # 只输出非 MCP cleanup 的错误
+        if stderr_output and "stdio_client" not in stderr_output:
+            print(stderr_output, file=old_stderr)
+
+
+def browser_check(
+    url: str = "http://localhost:5173",
+    mode: str = "inspect",
+    viewport: dict | None = None,
+    fresh: bool = False,
+    wait: int = 2,
+    actions: list | None = None,
+    script: str | None = None,
+    screenshot: bool = False,
+    format: str = "json",
+) -> str:
+    """同步包装：browser_check 的同步入口。"""
+    async def _run() -> dict | str:
+        return await _browser_check_async(
+            url=url, mode=mode, viewport=viewport, fresh=fresh, wait=wait,
+            actions=actions, script=script, screenshot=screenshot, format=format,
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        result = _run_async_in_thread(_run())
+    else:
+        # 没有运行中的事件循环，直接 asyncio.run
+        import io
+        import sys
+        old_stderr = sys.stderr
+        captured = io.StringIO()
+        sys.stderr = captured
+        try:
+            result = asyncio.run(_run())
+        except _CLEANUP_EXC_TYPES as e:
+            log.debug(f"[browser_check] suppressed cleanup race: {e}")
+            result = {"error": "MCP connection cleanup race"}
+        finally:
+            sys.stderr = old_stderr
+            stderr_output = captured.getvalue()
+            if stderr_output and "stdio_client" not in stderr_output:
+                print(stderr_output, file=old_stderr)
+
+    # 统一返回字符串
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    return str(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. 兼容包装（deprecated，保留旧接口）
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _browser_test_compat_async(
+    url: str,
+    actions: list | None = None,
+    screenshot: bool = True,
+    viewport: dict | None = None,
+    start_command: str | None = None,
+    port: int = 5173,
+    startup_wait: int = 8,
+) -> str:
+    """兼容旧接口：browser_test → browser_check(mode="interact")"""
+    from tools_impl import start_dev_server
+
+    if start_command:
+        server_result = start_dev_server(start_command, port, startup_wait)
+        if server_result.startswith("[error]"):
+            return server_result
+
+    # 转换 actions 格式
+    converted_actions = []
+    for action in (actions or []):
+        converted_actions.append({
+            "type": action.get("type", ""),
+            "selector": action.get("selector", ""),
+            "value": action.get("value", action.get("script", "")),
+            "delay": action.get("delay", 1000),
+        })
+
+    result = await _browser_check_async(
+        url=url,
+        mode="interact",
+        viewport=viewport,
+        fresh=True,  # 旧 browser_test 总是刷新
+        wait=3,
+        actions=converted_actions,
+        screenshot=screenshot,
+        format="text",
+    )
+    return str(result)
 
 
 def browser_test_mcp(
@@ -470,47 +719,29 @@ def browser_test_mcp(
     viewport: dict | None = None,
     context_id: str = "reviewer",
 ) -> str:
-    """同步包装：调用 Playwright MCP bridge 执行 browser_test。
+    """兼容旧接口（deprecated）—— 直接调用 browser_check。"""
+    log.warning("[DEPRECATED] browser_test_mcp is deprecated, use browser_check instead")
 
-    每次调用创建独立 bridge，用完后立即关闭，避免 asyncgen 在 asyncio.run()
-    cleanup 阶段触发 anyio CancelScope 跨 task 错误。
-    """
-    async def _run() -> str:
-        bridge = PlaywrightMCPBridge()
-        await bridge.start()
-        try:
-            return await bridge.browser_test(url, actions, screenshot, viewport)
-        except Exception as e:
-            log.warning(f"[playwright_mcp] First attempt failed ({e}), recreating bridge...")
-            await bridge.close()
-            bridge = PlaywrightMCPBridge()
-            await bridge.start()
-            return await bridge.browser_test(url, actions, screenshot, viewport)
-        finally:
-            await bridge.close()
+    # 转换 actions 格式
+    converted_actions = []
+    for action in (actions or []):
+        converted_actions.append({
+            "type": action.get("type", ""),
+            "selector": action.get("selector", ""),
+            "value": action.get("value", action.get("script", "")),
+            "delay": action.get("delay", 1000),
+        })
 
-    # FIX BUG #8: Avoid asyncio.run() nesting — use existing loop or fallback
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(lambda: asyncio.run(_run()))
-            try:
-                return future.result()
-            except _CLEANUP_EXC_TYPES as e:
-                log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
-                return f"[error] Browser test failed due to MCP connection cleanup race"
-    try:
-        return asyncio.run(_run())
-    except _CLEANUP_EXC_TYPES as e:
-        log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
-        return f"[error] Browser test failed due to MCP connection cleanup race"
-    except Exception as e:
-        log.warning(f"[playwright_mcp] browser_test failed: {e}")
-        return f"[error] Browser test failed: {e}"
+    return browser_check(
+        url=url,
+        mode="interact",
+        viewport=viewport,
+        fresh=True,
+        wait=3,
+        actions=converted_actions,
+        screenshot=screenshot,
+        format="text",
+    )
 
 
 def browser_evaluate_mcp(
@@ -519,46 +750,131 @@ def browser_evaluate_mcp(
     viewport: dict | None = None,
     context_id: str = "reviewer",
 ) -> str:
-    """同步包装：调用 Playwright MCP bridge 执行 browser_evaluate。
+    """兼容旧接口（deprecated）—— 直接调用 browser_check。"""
+    log.warning("[DEPRECATED] browser_evaluate_mcp is deprecated, use browser_check instead")
 
-    每次调用创建独立 bridge，用完后立即关闭。
-    """
-    async def _run() -> str:
-        bridge = PlaywrightMCPBridge()
-        await bridge.start()
-        try:
-            return await bridge.browser_evaluate(script, url, viewport)
-        except Exception as e:
-            log.warning(f"[playwright_mcp] First attempt failed ({e}), recreating bridge...")
-            await bridge.close()
-            bridge = PlaywrightMCPBridge()
-            await bridge.start()
-            return await bridge.browser_evaluate(script, url, viewport)
-        finally:
-            await bridge.close()
+    return browser_check(
+        url=url or "http://localhost:5173",
+        mode="inspect",
+        viewport=viewport,
+        fresh=True,
+        wait=3,
+        script=script,
+        format="json",
+    )
 
-    # FIX BUG #8: Avoid asyncio.run() nesting
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. 辅助函数
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_ref_by_selector(snapshot: str, selector: str) -> str | None:
+    """在 accessibility snapshot 中通过 selector 查找 ref。"""
+    import re
+
+    if not selector or not snapshot:
+        return None
+
+    search_text = selector.strip()
+    for prefix in ("#", ".", "[", "]"):
+        search_text = search_text.replace(prefix, " ")
+    search_text = search_text.strip().lower()
+
+    if not search_text:
+        return None
+
+    ref_pattern = re.compile(r'\[ref=([^\]]+)\]')
+    candidates = []
+
+    for line in snapshot.splitlines():
+        line_lower = line.lower()
+        ref_match = ref_pattern.search(line)
+        if not ref_match:
+            continue
+
+        ref = ref_match.group(1)
+        text_without_ref = ref_pattern.sub('', line).lower()
+
+        if search_text in text_without_ref:
+            quality = len(text_without_ref) - len(search_text)
+            candidates.append((quality, ref, line.strip()))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+
+    return None
+
+
+def _summarize_snapshot(snapshot: str) -> dict:
+    """从 snapshot 中提取关键信息摘要。"""
+    lines = snapshot.splitlines()
+    elements = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("-") and "[ref=" in line:
+            # 提取元素类型和文本
+            parts = line.split("[ref=")
+            if len(parts) >= 2:
+                element_desc = parts[0].strip("- ").strip()
+                elements.append(element_desc)
+
+    return {
+        "element_count": len(elements),
+        "visible_elements": elements[:20],  # 前 20 个
+    }
+
+
+def _format_result_as_text(result: dict) -> str:
+    """将结构化结果格式化为文本报告（兼容旧格式）。"""
+    lines = []
+    lines.append(f"Viewport: {result['viewport']['width']}x{result['viewport']['height']}")
+    lines.append(f"URL: {result.get('url', 'N/A')}")
+    lines.append(f"Title: {result.get('title', 'N/A')}")
+
+    if "script_result" in result:
+        lines.append(f"Script result: {json.dumps(result['script_result'], ensure_ascii=False)[:500]}")
+
+    if "actions" in result:
+        for action in result["actions"]:
+            status = "✓" if action["status"] == "ok" else "✗"
+            lines.append(f"  {status} {action['type']}")
+            if "error" in action:
+                lines.append(f"    Error: {action['error']}")
+            if "result" in action:
+                lines.append(f"    Result: {json.dumps(action['result'], ensure_ascii=False)[:200]}")
+
+    if result.get("console_errors"):
+        lines.append(f"Console errors ({len(result['console_errors'])}):")
+        for err in result["console_errors"][:5]:
+            lines.append(f"  - {err[:200]}")
+
+    if "screenshot" in result:
+        lines.append(f"Screenshot: {result['screenshot']}")
+
+    if "error" in result:
+        lines.append(f"[error] {result['error']}")
+
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. 生命周期管理（Round 开始/结束）
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def close_all_sessions() -> None:
+    """关闭所有浏览器会话（在 Round 结束时调用）。"""
+    pool = BrowserSessionPool()
+    await pool.close_all()
+
+
+def close_all_sessions_sync() -> None:
+    """同步包装：关闭所有浏览器会话。"""
     try:
         loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None:
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(lambda: asyncio.run(_run()))
-            try:
-                return future.result()
-            except _CLEANUP_EXC_TYPES as e:
-                log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
-                return f"[error] browser_evaluate failed due to MCP connection cleanup race"
-    try:
-        return asyncio.run(_run())
-    except _CLEANUP_EXC_TYPES as e:
-        log.debug(f"[playwright_mcp] suppressed known cleanup race: {e}")
-        return f"[error] browser_evaluate failed due to MCP connection cleanup race"
-    except Exception as e:
-        log.warning(f"[playwright_mcp] browser_evaluate failed: {e}")
-        return f"[error] browser_evaluate failed: {e}"
-
-
-
+            future = executor.submit(lambda: asyncio.run(close_all_sessions()))
+            future.result(timeout=30)
+    except RuntimeError:
+        asyncio.run(close_all_sessions())
