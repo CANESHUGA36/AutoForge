@@ -37,6 +37,14 @@ RUN mkdir -p /templates && cd /templates && \
     cd /templates && \
     echo "Templates cached" && ls -la
 
+# --- Pre-install common frontend dependencies (speed up Builder npm install) ---
+# These are frequently used by Builder for React projects
+RUN mkdir -p /npm-cache && cd /npm-cache && \
+    npm init -y && \
+    npm install zustand lucide-react recharts && \
+    npm install -D tailwindcss@latest postcss autoprefixer @types/node && \
+    echo "Common dependencies cached"
+
 # --- Pre-install Playwright MCP and browser ---
 # This avoids runtime npx download delays and timeouts
 # MCP requires chrome-for-testing, not plain chromium.

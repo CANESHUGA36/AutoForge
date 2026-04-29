@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,9 +17,6 @@ import context
 import skills
 from tools import execute_tool
 from workspace_state import WorkspaceState, inject_state_into_messages
-
-# P2: Agent 级异步执行支持
-_AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent_")
 
 log = logging.getLogger("harness")
 client = OpenAI(api_key=config.API_KEY, base_url=config.BASE_URL)
@@ -74,7 +70,7 @@ class Agent:
     def __init__(self, name: str, system_prompt: str, tools: list, use_state: bool = False, logger=None, allowed_tools: set[str] | None = None):
         self.name = name
         catalog = skills.build_catalog_prompt()
-        self.system_prompt = system_prompt + (f"\n{catalog}" if catalog else "")
+        self.system_prompt = str(system_prompt) + (f"\n{catalog}" if catalog else "")
         self.tools = tools
         if allowed_tools is not None:
             self.tools = [t for t in tools if t["function"]["name"] in allowed_tools]
@@ -86,14 +82,6 @@ class Agent:
         """Run the agent and return the final text response."""
         text, _ = self.run_with_stats(user_prompt)
         return text
-
-    def run_async(self, user_prompt: str, timeout: int = 3600):
-        """异步运行 Agent，返回 Future 对象。
-        
-        用于 Harness 并行执行多个 Agent（如 CodeReviewer ∥ BrowserTester）。
-        调用方可以用 future.result(timeout=...) 等待结果。
-        """
-        return _AGENT_EXECUTOR.submit(self.run_with_stats, user_prompt)
 
     def run_with_stats(self, user_prompt: str, max_iterations: int = None) -> tuple[str, dict]:
         """Run the agent and return (final_text, usage_dict).

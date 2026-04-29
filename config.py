@@ -69,9 +69,12 @@ MAX_TOOL_ERRORS = 5
 AGENT_ITERATION_LIMITS = {
     "architect": int(os.environ.get("MAX_ITERATIONS_ARCHITECT", "30")),
     "sprint_master": int(os.environ.get("MAX_ITERATIONS_SPRINT_MASTER", "15")),
-    "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "50")),
-    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "40")),
-    "judge": int(os.environ.get("MAX_ITERATIONS_JUDGE", "10")),
+    # FIX: Increase Builder budget for first round (complex project setup)
+    "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "60")),
+    # FIX: Increase Reviewer budget when Builder hits limits
+    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "50")),
+    # FIX: Increase Judge budget for thorough evaluation
+    "judge": int(os.environ.get("MAX_ITERATIONS_JUDGE", "15")),
 }
 
 # 路径
@@ -89,6 +92,7 @@ CONTRACT_FILE = "contract.md"
 PROGRESS_FILE = "progress.md"
 SPRINT_FILE = "sprint.md"
 STATE_FILE = "harness_state.json"
+SPRINT_CONTRACT_FILE = "sprint_contract.md"
 
 # Dev Server 配置
 DEV_SERVER_PORTS = {

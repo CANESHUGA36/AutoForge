@@ -14,16 +14,45 @@ log = logging.getLogger("harness")
 # --------------------------------------------------------------------------- #
 #  Tier 定义
 # --------------------------------------------------------------------------- #
-TIER_1_GROUPS = ["F1", "F2", "F3", "F4"]
-TIER_2_GROUPS = ["F5", "F6", "F7", "F8", "F9"]
-TIER_3_GROUPS = ["F10", "F11", "F12", "F13", "F14", "F15", "F16", "F17"]
-DESIGN_PREFIX = "D"
-TECHNICAL_PREFIX = "T"
+# Tier groups are dynamically computed based on actual parsed groups
+# to support variable project sizes (small: 3-5 groups, medium: 8-12, large: 15+)
 
-TIER_REQUIREMENTS: dict[str, dict] = {
-    "tier1": {"groups": TIER_1_GROUPS, "min_rate": 1.0, "label": "MVP Core"},
-    "tier2": {"groups": TIER_2_GROUPS, "min_rate": 0.80, "label": "Core Experience"},
-}
+TIER_REQUIREMENTS: dict[str, dict] = {}
+
+OVERALL_PASS_THRESHOLD = 0.75
+GROUP_PASS_THRESHOLD_DEFAULT = 0.70
+
+# 连续卡死检测
+MAX_STUCK_ROUNDS = 3
+
+
+def _compute_tiers(group_ids: list[str]) -> dict[str, dict]:
+    """根据实际功能组数量动态计算 Tier 划分。
+    
+    策略：
+    - ≤ 5 个组：不分 tier，所有组都是 tier1（100% 通过）
+    - 6-10 个组：前 50% tier1（100%），后 50% tier2（80%）
+    - > 10 个组：前 40% tier1，中间 40% tier2，剩余 tier3（70%）
+    """
+    n = len(group_ids)
+    if n <= 5:
+        return {
+            "tier1": {"groups": group_ids, "min_rate": 1.0, "label": "All Features"},
+        }
+    elif n <= 10:
+        split = n // 2
+        return {
+            "tier1": {"groups": group_ids[:split], "min_rate": 1.0, "label": "MVP Core"},
+            "tier2": {"groups": group_ids[split:], "min_rate": 0.80, "label": "Core Experience"},
+        }
+    else:
+        t1_end = max(2, int(n * 0.4))
+        t2_end = max(t1_end + 1, int(n * 0.8))
+        return {
+            "tier1": {"groups": group_ids[:t1_end], "min_rate": 1.0, "label": "MVP Core"},
+            "tier2": {"groups": group_ids[t1_end:t2_end], "min_rate": 0.80, "label": "Core Experience"},
+            "tier3": {"groups": group_ids[t2_end:], "min_rate": 0.70, "label": "Extended"},
+        }
 
 OVERALL_PASS_THRESHOLD = 0.75
 GROUP_PASS_THRESHOLD_DEFAULT = 0.70
@@ -148,6 +177,11 @@ class FeatureGroupState:
         self.groups = groups  # [{"id": "F1", "name": "...", "criteria": [...]}, ...]
         self.group_ids = [g["id"] for g in groups]
         self.group_map = {g["id"]: g for g in groups}
+
+        # 动态计算 tier 划分
+        global TIER_REQUIREMENTS
+        TIER_REQUIREMENTS = _compute_tiers(self.group_ids)
+        log.info(f"[feature_groups] Dynamic tiers: { {k: len(v['groups']) for k,v in TIER_REQUIREMENTS.items()} }")
 
         # 每轮结束后更新：group_id -> 最新通过率 (0.0-1.0)
         self.pass_rates: dict[str, float] = {}
@@ -280,6 +314,35 @@ def _get_group_threshold(group_id: str) -> float:
         if group_id in cfg["groups"]:
             return cfg["min_rate"]
     return GROUP_PASS_THRESHOLD_DEFAULT
+
+
+def _check_exit_condition_dynamic(feature_groups: "FeatureGroupState") -> tuple[bool, str]:
+    """动态退出条件：根据实际 tier 结构判断。"""
+    if not feature_groups:
+        return False, "No feature groups"
+    
+    ts = feature_groups.tier_status()
+    overall = feature_groups.overall_rate()
+    
+    # 检查所有 tier
+    for tier_name, status in ts.items():
+        if not status["passed"]:
+            return False, (
+                f"{TIER_REQUIREMENTS.get(tier_name, {}).get('label', tier_name)} "
+                f"incomplete: {status['groups_complete']}/{status['groups_total']} "
+                f"groups, overall {overall:.0%}"
+            )
+    
+    # 检查 overall
+    if overall < OVERALL_PASS_THRESHOLD:
+        return False, f"Overall {overall:.0%} below threshold {OVERALL_PASS_THRESHOLD:.0%}"
+    
+    # 检查 stuck groups
+    stuck, stuck_gid = feature_groups.any_group_stuck()
+    if stuck:
+        return False, f"Group {stuck_gid} stuck for {feature_groups.stuck_counts.get(stuck_gid, 0)} rounds"
+    
+    return True, f"All tiers passed, overall {overall:.0%}"
 
 
 def get_group_instruction(group_id: str, group: dict) -> str:

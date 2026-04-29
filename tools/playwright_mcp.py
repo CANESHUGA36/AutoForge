@@ -100,11 +100,19 @@ class CacheManager:
                     pass
 
         # 4. 触发文件系统事件，强制 Vite 重新扫描
+        # 修改文件内容再改回来，确保 Vite 的 HMR 检测到变化
+        import time as _time
         for entry in (ws / "src" / "main.tsx", ws / "src" / "main.jsx",
                       ws / "src" / "index.tsx", ws / "src" / "App.tsx"):
             if entry.exists():
                 try:
-                    entry.touch(exist_ok=True)
+                    # 读取 -> 追加换行 -> 写回 -> 恢复原内容
+                    # 这样文件 mtime 一定会变化，Vite 的 chokidar 会检测到
+                    original = entry.read_text(encoding="utf-8")
+                    entry.write_text(original + "\n", encoding="utf-8")
+                    _time.sleep(0.1)
+                    entry.write_text(original, encoding="utf-8")
+                    cleared.append(f"hmr_trigger:{entry.name}")
                 except Exception:
                     pass
 
@@ -202,7 +210,8 @@ class BrowserSession:
                 pass
             except Exception:
                 pass
-            self._session = None
+            finally:
+                self._session = None
 
         if self._client_ctx is not None:
             try:
@@ -211,7 +220,8 @@ class BrowserSession:
                 pass
             except Exception:
                 pass
-            self._client_ctx = None
+            finally:
+                self._client_ctx = None
 
         self._initialized = False
         log.info("[BrowserSession] Closed")
@@ -247,11 +257,19 @@ class BrowserSession:
 
     async def navigate(self, url: str, fresh: bool = False, wait: int = 2) -> dict:
         """导航到 URL，返回页面基本信息。"""
+        # FIX: Convert file:// URLs to http://localhost for headless Chrome compatibility.
+        # Headless Chrome has restrictions on file:// protocol that can cause empty pages.
+        original_url = url
+        if url.startswith("file://"):
+            # Serve the file via a temporary local HTTP server
+            url = self._serve_file_via_http(url)
+            log.info(f"[BrowserSession] Converted {original_url} -> {url}")
+
         if fresh:
             url = CacheManager.add_cache_buster(url)
 
         nav_result = await self._call_tool("browser_navigate", {"url": url})
-        self._current_url = url
+        self._current_url = original_url
 
         # 提取标题
         title = self._extract_title(nav_result)
@@ -259,16 +277,104 @@ class BrowserSession:
         # 等待页面加载
         await asyncio.sleep(wait)
 
-        # 如果是 fresh 模式，再次导航确保完全刷新
+        # 如果是 fresh 模式，执行硬刷新确保拿到最新代码
+        # Vite dev server 的内存缓存可能导致旧代码被 serve，即使磁盘文件已更新
         if fresh:
-            await self._call_tool("browser_navigate", {"url": url})
-            await asyncio.sleep(1)
+            # 1. 执行 location.reload(true) 强制从服务器重新加载（绕过浏览器缓存）
+            await self._call_tool("browser_evaluate", {
+                "function": """() => {
+                    // 硬刷新：强制从服务器重新加载，绕过所有缓存
+                    window.location.reload(true);
+                    return 'hard_reload_triggered';
+                }"""
+            })
+            # 等待页面重新加载完成
+            await asyncio.sleep(wait + 1)
+            
+            # 2. 验证页面确实重新加载了（检查新的时间戳）
+            load_time_result = await self._call_tool("browser_evaluate", {
+                "function": "() => document.readyState"
+            })
+            load_state = self._extract_eval_result(load_time_result)
+            if load_state != 'complete':
+                await asyncio.sleep(2)
+            
+            # 3. 再次获取标题确认
             title2 = await self._call_tool("browser_evaluate", {
                 "function": "() => document.title"
             })
             title = self._extract_eval_result(title2) or title
 
-        return {"url": url, "title": title}
+        return {"url": original_url, "title": title}
+
+    def _serve_file_via_http(self, file_url: str) -> str:
+        """Start a minimal HTTP server to serve a local file.
+        
+        Headless Chrome has restrictions on file:// protocol.
+        We serve the file via http://localhost instead.
+        """
+        import http.server
+        import socketserver
+        import threading
+        from pathlib import Path
+        
+        # Extract file path from file:// URL
+        file_path = file_url.replace("file://", "").replace("file:///", "/")
+        file_path = Path(file_path).resolve()
+        
+        # Fallback: if the path doesn't exist and looks like a /workspace placeholder,
+        # try mapping it to the actual config.WORKSPACE directory.
+        if not file_path.exists():
+            import config
+            workspace = Path(config.WORKSPACE).resolve()
+            # Check if the path is under /workspace (Linux) or a generic placeholder
+            path_str = str(file_path).replace("\\", "/")
+            if "/workspace" in path_str:
+                # Extract the relative part after /workspace
+                rel_idx = path_str.find("/workspace") + len("/workspace")
+                relative = path_str[rel_idx:].lstrip("/")
+                mapped = workspace / relative if relative else workspace / "index.html"
+                if mapped.exists():
+                    file_path = mapped
+                else:
+                    # Try workspace root as fallback
+                    fallback = workspace / "index.html"
+                    if fallback.exists():
+                        file_path = fallback
+        
+        if not file_path.exists():
+            log.warning(f"[BrowserSession] File not found: {file_path} (original URL: {file_url})")
+            return file_url
+        
+        # Use workspace directory as root, or file's parent directory
+        root_dir = str(file_path.parent)
+        
+        # Find an available port
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=root_dir, **kwargs)
+            
+            def log_message(self, format, *args):
+                # Suppress HTTP server logs
+                pass
+        
+        httpd = socketserver.TCPServer(("127.0.0.1", port), Handler)
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
+        
+        # Store for cleanup
+        if not hasattr(self, '_http_servers'):
+            self._http_servers = []
+        self._http_servers.append(httpd)
+        
+        # Return HTTP URL
+        return f"http://127.0.0.1:{port}/{file_path.name}"
 
     async def execute_script(self, script: str) -> Any:
         """执行 JavaScript 并返回结果。"""
@@ -495,6 +601,9 @@ async def _browser_check_async(
     try:
         # ── Step 1: 缓存处理 ──
         if fresh:
+            # FIX: Instead of closing the entire session (which is slow),
+            # just clear browser caches and reload the page.
+            # Only recreate session if viewport changed.
             await pool.invalidate_caches()
             wait = max(wait, 3)  # fresh 模式增加等待时间
             log.info(f"[browser_check] Fresh mode: caches cleared, wait={wait}s")
@@ -553,6 +662,39 @@ async def _browser_check_async(
                     elif action_type == "evaluate":
                         eval_result = await session.execute_script(action.get("script", action.get("value", "")))
                         action_result["result"] = eval_result
+
+                    elif action_type == "upload":
+                        # Simulate file upload by setting files on a file input and dispatching change event
+                        selector = action.get("selector", "")
+                        files = action.get("files", [])
+                        if not selector:
+                            action_result["status"] = "error"
+                            action_result["error"] = "upload action requires 'selector'"
+                        elif not files:
+                            action_result["status"] = "error"
+                            action_result["error"] = "upload action requires 'files' array"
+                        else:
+                            # Build file objects and trigger change event via evaluate
+                            file_objects = []
+                            for f in files:
+                                name = f.get("name", "file")
+                                mime = f.get("type", "application/octet-stream")
+                                content = f.get("content", "")
+                                file_objects.append(f"new File(['{content}'], '{name}', {{ type: '{mime}' }})")
+                            files_js = ", ".join(file_objects)
+                            script = f"""
+                            (() => {{
+                                const input = document.querySelector('{selector}');
+                                if (!input) return {{ error: 'File input not found: {selector}' }};
+                                const dt = new DataTransfer();
+                                [{files_js}].forEach(file => dt.items.add(file));
+                                input.files = dt.files;
+                                input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                return {{ uploaded: true, fileCount: input.files.length }};
+                            }})()
+                            """
+                            eval_result = await session.execute_script(script)
+                            action_result["result"] = eval_result
 
                 except Exception as e:
                     action_result["status"] = "error"
@@ -631,6 +773,21 @@ def browser_check(
     format: str = "json",
 ) -> str:
     """同步包装：browser_check 的同步入口。"""
+    # FIX: LLM may pass wait as a string (e.g., "3" instead of 3).
+    # Convert to int to prevent TypeError in max(wait, 3).
+    try:
+        wait = int(wait)
+    except (ValueError, TypeError):
+        wait = 2
+
+    # FIX: LLM may pass actions as a JSON string instead of a list.
+    # Parse it to prevent "'str' object has no attribute 'get'" error.
+    if isinstance(actions, str):
+        try:
+            actions = json.loads(actions)
+        except json.JSONDecodeError:
+            actions = None
+
     async def _run() -> dict | str:
         return await _browser_check_async(
             url=url, mode=mode, viewport=viewport, fresh=fresh, wait=wait,

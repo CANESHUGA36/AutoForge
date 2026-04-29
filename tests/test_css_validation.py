@@ -31,7 +31,7 @@ def test_validate_css_classes_reports_missing(tmp_path, monkeypatch):
     css.write_text(".bg-background{--tw-bg-opacity:1}")  # missing text-primary
 
     result = _validate_css_classes(["bg-background", "text-primary"])
-    assert "[CSS ERROR]" in result
+    assert "[CSS WARNING]" in result
     assert "text-primary" in result
 
 

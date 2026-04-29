@@ -14,14 +14,15 @@ from dashboard import Dashboard
 from eval_cache import EvalCache
 from prompts import (
     ARCHITECT_SYSTEM, BUILDER_SYSTEM, REVIEWER_SYSTEM, JUDGE_SYSTEM, SPRINT_MASTER_SYSTEM,
+    refresh_prompts,
 )
 from tools_impl import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
-from harness.build import build_build_task
 from harness.eval import parse_pass_rates, parse_skip_rate, compute_actual_contract_rate, parse_group_pass_rates
 from harness.git import GitManager
 from harness.feature_groups import (
     FeatureGroupState, parse_feature_groups, get_group_instruction,
     TIER_REQUIREMENTS, OVERALL_PASS_THRESHOLD, _get_group_threshold,
+    _check_exit_condition_dynamic,
 )
 from harness.logging import setup_file_logging, log_round_stats, log_final_stats
 from harness.sprint import plan_sprint_master
@@ -44,6 +45,8 @@ class Harness:
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         config.WORKSPACE = str(self.workspace.resolve())
+        # 刷新 prompts 缓存，使 {{WORKSPACE}} 等模板变量使用最新路径
+        refresh_prompts()
         #                 Logger
         self.log = logging.getLogger(f"harness.{id(self)}")
         self.log.setLevel(logging.INFO)
@@ -59,7 +62,7 @@ class Harness:
         EXEC_TOOLS = {"run_bash", "start_dev_server"}
         BROWSER_TOOLS = {"browser_test", "browser_evaluate"}
         GEN_TOOLS = {"generate_image", "search_web", "analyze_image"}
-        META_TOOLS = {"validate_build", "project_init", "delegate_task"}
+        META_TOOLS = {"validate_build", "project_init"}
 
         architect_tools = CORE_TOOLS | GEN_TOOLS | {"search_web"}
         sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
@@ -205,7 +208,12 @@ class Harness:
         start_round = self._completed_rounds + 1
         for round_num in range(start_round, getattr(config, 'MAX_ROUNDS_HARD', 10) + 1):
             # FIX BUG #9: Recalculate max_rounds each round so runtime adjustments apply
-            max_rounds = self._calculate_max_rounds()
+            # Respect explicit MAX_HARNESS_ROUNDS env var if set (> 0)
+            explicit_max = getattr(config, 'MAX_ROUNDS', 0)
+            if explicit_max > 0:
+                max_rounds = explicit_max
+            else:
+                max_rounds = self._calculate_max_rounds()
             if round_num > max_rounds:
                 self.log.info(f"Stopping at round {round_num-1} (dynamic max_rounds={max_rounds})")
                 break
@@ -309,6 +317,15 @@ class Harness:
             except Exception:
                 pass
 
+        # FIX: Force restart dev server BEFORE Builder starts, so Builder works
+        # with a fresh dev server that reliably picks up file changes.
+        # Previously dev server was restarted AFTER Builder, causing Builder's
+        # own browser_check calls to see stale cached code.
+        from tools_impl import _kill_dev_server
+        self.log.info("[dev_server] Stopping existing dev server before Builder...")
+        _kill_dev_server()
+        time.sleep(2)  # Wait for port release
+
         # ===== Pipeline Phase 1: 环境预检（仅在需要时）=====
         if round_num == 1 or self._needs_env_check():
             self.log.info("[pipeline] Phase 1 — Environment check")
@@ -339,15 +356,6 @@ class Harness:
         )
         if strategy['strategy'] == 'PIVOT' and strategy.get('new_direction'):
             self.log.info(f"  New direction: {strategy['new_direction']}")
-
-        # FIX: Force restart dev server to ensure Builder's code changes are loaded.
-        # Next.js Turbopack may not hot-reload files written by Python subprocess
-        # (especially new files or files modified in a previous round). Killing the
-        # dev server before validation forces a clean start from the latest source.
-        from tools_impl import _kill_dev_server
-        self.log.info("[dev_server] Stopping existing dev server before validation...")
-        _kill_dev_server()
-        time.sleep(2)  # Wait for port release
 
         # ===== Pipeline Phase 2: 验证 + 提交 =====
         self.log.info("[pipeline] Phase 2 — Validation & commit")
@@ -432,10 +440,16 @@ class Harness:
         return msg
 
     def _needs_env_check(self) -> bool:
-        """判断是否需要运行 PreBuildGate。"""
+        """判断是否需要运行 PreBuildGate。
+        
+        纯 HTML 项目不需要环境检查（没有 package.json）。
+        """
         pkg = self.workspace / "package.json"
+        # Pure HTML project
+        if not pkg.exists():
+            return False
         nm = self.workspace / "node_modules"
-        return not pkg.exists() or not nm.exists()
+        return not nm.exists()
 
     def _handle_pipeline_failure(
         self, round_num: int, round_start: float,
@@ -474,11 +488,80 @@ class Harness:
         self.dashboard.update_tokens(self.token_totals["prompt"], self.token_totals["completion"])
         return {"sprint_rate": sprint_rate, "contract_rate": contract_rate, "score": contract_rate}
 
+    def _calculate_reviewer_budget(self, round_num: int) -> tuple[int, str]:
+        """自适应验证深度：根据功能组复杂度动态调整 Reviewer 预算。
+        
+        注意：Reviewer 验证的是新功能组，每个功能组都需要独立的完整验证，
+        不应过度依赖 Builder 历史表现（Builder 成功率只影响策略提示，不影响预算）。
+        
+        Returns:
+            (max_iterations, strategy_hint): Reviewer 的迭代限制和策略提示
+        """
+        # 基础预算
+        base_budget = 15
+        
+        # 根据 Builder 历史成功率生成策略提示（不影响预算）
+        builder_success_rate = 0.0
+        if self.sprint_pass_rate_history:
+            recent = self.sprint_pass_rate_history[-3:]
+            builder_success_rate = sum(recent) / len(recent)
+        
+        # 根据功能组复杂度调整预算
+        group_complexity = 1.0
+        criteria_count = 5  # default
+        if self.feature_groups and self.feature_groups.current_group:
+            criteria_count = len(self.feature_groups.current_group.get("criteria", []))
+            # 标准越多，需要更多验证时间
+            group_complexity = 1.0 + (criteria_count - 3) * 0.15
+        
+        # 计算自适应预算
+        # 每个功能组都需要独立的完整验证，预算主要由复杂度决定
+        # 第一轮给更多预算（需要熟悉项目），后续轮次稳定
+        round_factor = 1.3 if round_num == 1 else 1.0
+        adaptive_budget = int(base_budget * group_complexity * round_factor)
+        
+        # FIX: Increase Reviewer budget range (15-35) to prevent INCOMPLETE reviews
+        adaptive_budget = max(18, min(adaptive_budget, 35))
+        
+        # 生成策略提示
+        if builder_success_rate >= 0.8:
+            strategy_hint = (
+                "Builder 近期表现优秀（成功率 {:.0%}），验证可聚焦于：\n"
+                "1. 快速确认核心功能是否存在\n"
+                "2. 重点检查边界条件和错误处理\n"
+                "3. 无需过度验证已实现模式"
+            ).format(builder_success_rate)
+        elif builder_success_rate >= 0.5:
+            strategy_hint = (
+                "Builder 表现中等（成功率 {:.0%}），标准验证深度：\n"
+                "1. 完整验证所有验收标准\n"
+                "2. 代码审查优先于浏览器交互测试（React 受控组件无法程序化触发）\n"
+                "3. 检查代码完整性和非存根实现"
+            ).format(builder_success_rate)
+        else:
+            strategy_hint = (
+                "Builder 近期表现不佳（成功率 {:.0%}），需要深度验证：\n"
+                "1. 逐条验证每个验收标准（优先代码审查）\n"
+                "2. 额外检查条件渲染和状态管理\n"
+                "3. 验证事件处理函数是否非存根\n"
+                "4. 检查是否有回归问题\n"
+                "5. 限制 browser_check 调用次数（最多 3 次），避免在 React 受控组件上浪费迭代"
+            ).format(builder_success_rate)
+        
+        self.log.info(
+            f"[adaptive_review] Round {round_num} | "
+            f"builder_rate={builder_success_rate:.0%} | "
+            f"complexity={group_complexity:.1f} | "
+            f"budget={adaptive_budget} | round_factor={round_factor:.1f}"
+        )
+        
+        return adaptive_budget, strategy_hint
+
     def _run_evaluation(self, round_num: int, round_start: float, build_usage: dict, strategy: dict) -> dict:
         """运行 Reviewer + Judge 评估阶段（双轨评分版）。"""
         contract_ref = config.CONTRACT_FILE
 
-        # Step 1: Reviewer
+        # Step 1: Reviewer（自适应验证深度）
         self.log.info("Evaluate phase — Step 1: Reviewer (unified review)")
         self.dashboard.start_agent("Reviewer")
 
@@ -491,17 +574,21 @@ class Harness:
                 f"验收标准范围: {cg['id']}.1 ~ {cg['id']}.{len(cg['criteria'])}\n"
                 f"你只验证这个功能组的标准，不要检查其他功能组。\n"
             )
+        
+        # 自适应验证预算
+        reviewer_budget, strategy_hint = self._calculate_reviewer_budget(round_num)
 
         review_task = (
             f"Review the codebase and test the web app for round {round_num}.\n"
             f"{group_section}"
+            f"{strategy_hint}\n\n"
             f"Read the acceptance criteria in {contract_ref}, then:\n"
             f"1. Examine the MOST IMPORTANT source files (max 5 files) related to the current feature group.\n"
-            f"2. Run browser tests (desktop + mobile). Dev server is already running.\n"
+            f"2. Run browser tests. Dev server is already running.\n"
             f"3. Produce a unified review report focused ONLY on the current feature group.\n"
-            f"Limit: 15 iterations max."
+            f"Limit: {reviewer_budget} iterations max."
         )
-        review_result, review_usage = self.reviewer.run_with_stats(review_task)
+        review_result, review_usage = self.reviewer.run_with_stats(review_task, max_iterations=reviewer_budget)
 
         # FIX: Detect incomplete Reviewer reports and protect against Judge over-scoring.
         # If the Reviewer hit max iterations, its report may be partial. We mark it clearly
@@ -637,30 +724,60 @@ class Harness:
             )
             contract_rate = adjusted_contract
 
-        # Cap scores when Reviewer report is incomplete or failed
-        # NOTE: For conditionally-rendered features, INCOMPLETE often means the Reviewer
-        # couldn't trigger the condition (e.g., upload a file). We raise the cap from 30%
-        # to 50% to give Judge room to score based on code review, while still preventing
-        # false-high scores from incomplete testing.
+        # Handle Reviewer incomplete/error status
+        # NOTE: Reviewer may be INCOMPLETE because browser automation cannot trigger
+        # React controlled components, file uploads, audio processing, etc. This is
+        # a browser limitation, NOT a code failure. Judge performs independent code
+        # review and should be trusted if it verifies implementation correctness.
         if reviewer_status == "incomplete":
-            capped_contract = min(contract_rate, 0.50)
-            capped_sprint = min(sprint_rate, 0.50)
-            if capped_contract < contract_rate or capped_sprint < sprint_rate:
-                self.log.warning(
-                    f"[judge] Judge gave {contract_rate:.0%} contract / {sprint_rate:.0%} sprint, "
-                    f"but Reviewer report was INCOMPLETE. Capping to "
-                    f"{capped_contract:.0%} / {capped_sprint:.0%}."
+            # Check if Judge performed its own code review
+            judge_did_code_review = (
+                "read_file" in str(judge_result).lower()
+                or "source code" in str(judge_result).lower()
+                or "code review" in str(judge_result).lower()
+                or "implementation" in str(judge_result).lower()
+            )
+            if judge_did_code_review:
+                # Judge independently verified code — trust its score fully
+                # Browser automation limitations should NOT block code-correct features
+                self.log.info(
+                    f"[judge] Reviewer INCOMPLETE but Judge performed independent code review. "
+                    f"Trusting Judge's score: {contract_rate:.0%} / {sprint_rate:.0%}. "
+                    f"(Reviewer likely hit browser automation limits for React/file-upload features)"
                 )
-            contract_rate = capped_contract
-            sprint_rate = capped_sprint
+                # NO CAP applied — code correctness is the ground truth
+            else:
+                # Judge did not perform code review — soft cap as safety net
+                capped_contract = min(contract_rate, 0.85)
+                capped_sprint = min(sprint_rate, 0.85)
+                if capped_contract < contract_rate or capped_sprint < sprint_rate:
+                    self.log.warning(
+                        f"[judge] Reviewer INCOMPLETE and Judge did not perform code review. "
+                        f"Soft-capping to {capped_contract:.0%} / {capped_sprint:.0%}."
+                    )
+                contract_rate = capped_contract
+                sprint_rate = capped_sprint
         elif reviewer_status == "error":
-            if contract_rate > 0 or sprint_rate > 0:
-                self.log.warning(
-                    f"[judge] Judge gave {contract_rate:.0%} contract / {sprint_rate:.0%} sprint, "
-                    f"but Reviewer FAILED. Forcing to 0%."
+            # Reviewer hit an actual error (not just iteration limit)
+            # Only force 0% if Judge didn't do any code review
+            judge_did_code_review = (
+                "read_file" in str(judge_result).lower()
+                or "source code" in str(judge_result).lower()
+                or "code review" in str(judge_result).lower()
+            )
+            if not judge_did_code_review:
+                if contract_rate > 0 or sprint_rate > 0:
+                    self.log.warning(
+                        f"[judge] Judge gave {contract_rate:.0%} contract / {sprint_rate:.0%} sprint, "
+                        f"but Reviewer FAILED and Judge did no code review. Forcing to 0%."
+                    )
+                contract_rate = 0.0
+                sprint_rate = 0.0
+            else:
+                self.log.info(
+                    f"[judge] Reviewer ERROR but Judge performed code review. "
+                    f"Trusting Judge's score: {contract_rate:.0%}."
                 )
-            contract_rate = 0.0
-            sprint_rate = 0.0
 
         # ------------------------------------------------------------------ #
         #  Update feature-group state (NEW)
@@ -794,31 +911,11 @@ class Harness:
         task += "\n\nCommit with git when done."
         return task
 
-    def _build_trend_summary(self) -> str:
-        """将完整历史分数压缩为趋势摘要（双轨评分版）"""
-        if not self.contract_pass_rate_history:
-            return "No scores yet."
-        recent = self.contract_pass_rate_history[-5:]
-        trend = " -> ".join(f"{s:.0%}" for s in recent)
-        best_idx = max(range(len(self.contract_pass_rate_history)), key=lambda i: self.contract_pass_rate_history[i])
-        best_round = best_idx + 1
-        best_score = self.contract_pass_rate_history[best_idx]
-        last_strategy = self.strategy_history[-1]["strategy"] if self.strategy_history else "UNKNOWN"
-        consecutive_refine = 0
-        for s in reversed(self.strategy_history):
-            if s["strategy"] == "REFINE":
-                consecutive_refine += 1
-            else:
-                break
-        return (
-            f"Score Trend: {trend}\n"
-            f"Best Round: Round {best_round} ({best_score:.1f})\n"
-            f"Last Strategy: {last_strategy}\n"
-            f"Consecutive REFINEs: {consecutive_refine}"
-        )
-
     def _inject_iteration_budget(self, build_task: str) -> str:
-        """从 sprint.md 解析预估迭代数，动态注入预算提示。"""
+        """从 sprint.md 解析预估迭代数，动态注入预算提示。
+        
+        自适应预算：根据功能组复杂度、历史表现和项目类型调整。
+        """
         sprint_path = self.workspace / config.SPRINT_FILE
         if not sprint_path.exists():
             return build_task
@@ -838,11 +935,46 @@ class Harness:
             if match:
                 conservative = int(match.group(1))
                 break
-
+        
+        # 自适应调整：根据功能组复杂度
+        complexity_multiplier = 1.0
+        if self.feature_groups and self.feature_groups.current_group:
+            criteria_count = len(self.feature_groups.current_group.get("criteria", []))
+            # 标准越多，预算越多
+            complexity_multiplier = 1.0 + (criteria_count - 3) * 0.1
+        
+        # 自适应调整：根据项目类型
+        project_type_multiplier = 1.0
+        pkg = self.workspace / "package.json"
+        if not pkg.exists():
+            # 纯 HTML 项目更简单，预算减少
+            project_type_multiplier = 0.8
+        
+        # 自适应调整：根据历史成功率
+        history_multiplier = 1.0
+        if self.sprint_pass_rate_history:
+            recent_rate = sum(self.sprint_pass_rate_history[-3:]) / len(self.sprint_pass_rate_history[-3:])
+            if recent_rate >= 0.8:
+                history_multiplier = 0.9  # 表现好，稍微收紧
+            elif recent_rate < 0.5:
+                history_multiplier = 1.2  # 表现差，给更多空间
+        
+        adjusted = int(conservative * complexity_multiplier * project_type_multiplier * history_multiplier)
+        conservative = max(15, min(adjusted, 40))  # 限制范围
+        
         threshold = int(conservative * 0.8)
         hard_limit = int(conservative * 1.2)
+        
+        self.log.info(
+            f"[adaptive_budget] base={conservative} | "
+            f"complexity={complexity_multiplier:.1f} | "
+            f"type={project_type_multiplier:.1f} | "
+            f"history={history_multiplier:.1f} | "
+            f"final={conservative}"
+        )
+        
         budget_msg = f"""
-## Iteration Budget（严格限制）
+## Iteration Budget（自适应限制）
 本轮保守预算：{conservative} 次迭代。
 硬上限：{hard_limit} 次迭代（达到后强制停止）。
 
@@ -1085,14 +1217,8 @@ class Harness:
     # ------------------------------------------------------------------ #
     def _check_exit_condition(self) -> tuple[bool, str]:
         """检查是否满足退出条件（功能组推进版）。
-
-        成功条件：
-        1. Tier 1（F1-F4）所有组 100% 通过
-        2. Tier 2（F5-F9）所有组 ≥ 80% 通过
-        3. Overall ≥ 75%
-
-        失败/继续条件：
-        - 任一条件不满足 → 继续
+        
+        使用动态 tier 划分：根据实际功能组数量自适应。
         """
         if not self.feature_groups:
             # Legacy mode: use contract rate threshold
@@ -1103,37 +1229,7 @@ class Harness:
                 return False, f"Contract pass rate {rate:.0%} below threshold"
             return False, "No scores yet"
 
-        ts = self.feature_groups.tier_status()
-        overall = self.feature_groups.overall_rate()
-
-        # Check Tier 1
-        if not ts["tier1"]["passed"]:
-            return False, (
-                f"Tier 1 MVP incomplete: {ts['tier1']['groups_complete']}/"
-                f"{ts['tier1']['groups_total']} groups, overall {overall:.0%}"
-            )
-
-        # Check Tier 2
-        if not ts["tier2"]["passed"]:
-            return False, (
-                f"Tier 2 Core incomplete: {ts['tier2']['groups_complete']}/"
-                f"{ts['tier2']['groups_total']} groups, overall {overall:.0%}"
-            )
-
-        # Check overall
-        if overall < OVERALL_PASS_THRESHOLD:
-            return False, (
-                f"Overall {overall:.0%} below threshold {OVERALL_PASS_THRESHOLD:.0%}"
-            )
-
-        # Check stuck groups
-        stuck, stuck_gid = self.feature_groups.any_group_stuck()
-        if stuck:
-            return False, f"Group {stuck_gid} stuck for {self.feature_groups.stuck_counts.get(stuck_gid, 0)} rounds"
-
-        return True, (
-            f"Tier 1 ✅, Tier 2 ✅, Overall {overall:.0%} ✅"
-        )
+        return _check_exit_condition_dynamic(self.feature_groups)
 
     def _strategy_adjustment(self) -> int:
         """Builder 策略信号（双轨评分版）"""

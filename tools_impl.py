@@ -14,14 +14,14 @@ import requests
 import config
 from skills import get_skill_path
 
-HAS_PLAYWRIGHT = False  # Playwright removed, using MCP instead
-
 _BUILDABLE_EXTENSIONS = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss"}
-_server_pids: dict[int, int] = {}
 _dev_server_proc = None
 _FILE_LIST_CACHE: dict[str, tuple[float, str]] = {}
 _LAST_BUILD_CHECK: float = 0.0
 _BUILD_CHECK_COOLDOWN: float = 30.0
+# FIX: Cache build results to avoid redundant rebuilds
+_BUILD_RESULT_CACHE: dict[str, tuple[float, str]] = {}
+_BUILD_CACHE_TTL: float = 15.0  # Cache build results for 15 seconds
 _DEFAULT_EXCLUDES = {
     ".git", "node_modules", ".next", "out", "dist",
     "__pycache__", ".venv", "venv", ".events",
@@ -73,7 +73,10 @@ def read_file(path: str) -> str:
 
         content = p.read_text(encoding="utf-8", errors="replace")
 
-        limit = 30_000
+        # FIX: Increase limit for single-file projects (HTML/JS/CSS merged into one file)
+        # Large single files are common in pure-HTML projects and must be read fully
+        # to avoid code duplication and corruption during iterative editing.
+        limit = 80_000 if p.suffix in (".html", "htm") else 30_000
 
         if len(content) > limit:
 
@@ -120,7 +123,7 @@ def _validate_css_classes(expected_classes: list[str] | None = None) -> str:
         expected = expected_classes or ["bg-background", "text-primary", "border-primary"]
         missing = [c for c in expected if f".{c}" not in css_content and f"{c}:" not in css_content]
         if missing:
-            return f"\n[CSS ERROR] Missing classes: {', '.join(missing)}. Check Tailwind/CSS config."
+            return f"\n[CSS WARNING] Missing classes: {', '.join(missing)}. Check Tailwind/CSS config. (Non-blocking)"
         return f"\n[CSS OK] All {len(expected)} expected classes found."
     except Exception:
         return ""
@@ -128,10 +131,24 @@ def _validate_css_classes(expected_classes: list[str] | None = None) -> str:
 
 def validate_build() -> str:
     """Explicitly run build validation and return the result."""
+    global _BUILD_RESULT_CACHE
     ws = Path(config.WORKSPACE)
+    # Pure HTML projects don't need build validation
+    if (ws / "index.html").exists() and not (ws / "package.json").exists():
+        return "[BUILD OK] Pure HTML project — no build step required."
     if (ws / "package.json").exists():
+        # FIX: Check build cache to avoid redundant rebuilds within TTL
+        cache_key = str(ws.resolve())
+        now = time.time()
+        if cache_key in _BUILD_RESULT_CACHE:
+            cached_time, cached_result = _BUILD_RESULT_CACHE[cache_key]
+            if now - cached_time < _BUILD_CACHE_TTL:
+                return cached_result
         # FIX BUG #4: Use exit code as primary signal, heuristic as fallback
-        build_result = run_bash("npm run build 2>&1 | tail -40", timeout=180)
+        # Cross-platform: avoid Unix tail command, truncate in Python
+        build_full = run_bash("npm run build 2>&1", timeout=180)
+        build_lines = build_full.splitlines()
+        build_result = "\n".join(build_lines[-40:]) if len(build_lines) > 40 else build_full
         # run_bash returns [exit code: N] on non-zero exit
         exit_code_match = __import__('re').search(r'\[exit code:\s*(\d+)\]', build_result)
         exit_code = int(exit_code_match.group(1)) if exit_code_match else None
@@ -154,7 +171,10 @@ def validate_build() -> str:
         _update_workspace_build_status("ok")
         css_check = _validate_css_classes()
         # Build succeeded (exit code = 0 and no real errors detected)
-        return f"[BUILD OK] Production build succeeded.{css_check}"
+        result = f"[BUILD OK] Production build succeeded.{css_check}"
+        # FIX: Cache successful build result
+        _BUILD_RESULT_CACHE[cache_key] = (time.time(), result)
+        return result
     elif (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
         return "[BUILD INFO] Python project detected - no npm build available."
     return "[BUILD INFO] No package.json found - skipping build validation."
@@ -172,6 +192,23 @@ def _auto_validate_build(path: str) -> str:
     return validate_build()
 
 
+def _trigger_vite_hmr() -> None:
+    """Trigger Vite HMR recompile by touching entry files.
+
+    Python's write_text() may not trigger chokidar file watchers reliably,
+    especially for large files. Touching entry files forces Vite to
+    invalidate its module graph and recompile.
+    """
+    ws = Path(config.WORKSPACE)
+    for entry in (ws / "src" / "main.tsx", ws / "src" / "main.jsx",
+                  ws / "src" / "index.tsx", ws / "src" / "App.tsx"):
+        if entry.exists():
+            try:
+                entry.touch(exist_ok=True)
+            except Exception:
+                pass
+
+
 def write_file(path: str, content: str) -> str:
     """"""
     try:
@@ -179,8 +216,18 @@ def write_file(path: str, content: str) -> str:
             return "[error] Empty file path"
         p = _resolve(path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        # Check if content actually changed to avoid unnecessary rebuilds
+        content_changed = True
+        if p.exists():
+            existing = p.read_text(encoding="utf-8", errors="replace")
+            content_changed = existing != content
         p.write_text(content, encoding="utf-8")
-        build_status = _auto_validate_build(path)
+        # FIX: Trigger Vite HMR so dev server picks up the change immediately
+        _trigger_vite_hmr()
+        # Only auto-validate if content actually changed
+        build_status = ""
+        if content_changed:
+            build_status = _auto_validate_build(path)
         return f"Wrote {len(content)} chars to {path}{build_status}"
     except Exception as e:
         return f"[error] {e}"
@@ -208,21 +255,31 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
         content = p.read_text(encoding="utf-8", errors="replace")
 
         if old_string not in content:
-
+            # Try fuzzy matching: normalize whitespace and try again
+            import re
+            normalized_content = re.sub(r'\s+', ' ', content).strip()
+            normalized_old = re.sub(r'\s+', ' ', old_string).strip()
+            if normalized_old in normalized_content:
+                # Find the actual substring in original content that matches
+                # Use a sliding window approach
+                old_len = len(old_string)
+                for i in range(len(content) - old_len + 1):
+                    window = content[i:i + old_len]
+                    if re.sub(r'\s+', ' ', window).strip() == normalized_old:
+                        actual_old = window
+                        new_content = content.replace(actual_old, new_string, 1)
+                        p.write_text(new_content, encoding="utf-8")
+                        _trigger_vite_hmr()
+                        build_status = _auto_validate_build(path)
+                        return f"Edited {path} (fuzzy match){build_status}"
+            
             lines_with_match = []
-
             for i, line in enumerate(content.splitlines(), 1):
-
                 if old_string[:40] in line or (len(old_string) > 10 and old_string[:20] in line):
-
                     lines_with_match.append(f"  line {i}: {line.strip()[:100]}")
-
             hint = ""
-
             if lines_with_match:
-
                 hint = "\nPartial matches found:\n" + "\n".join(lines_with_match[:3])
-
             return f"[error] old_string not found. Must match EXACTLY.{hint}"
 
         count = content.count(old_string)
@@ -235,7 +292,8 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
         p.write_text(new_content, encoding="utf-8")
 
-        #          
+        # FIX: Trigger Vite HMR so dev server picks up the change immediately
+        _trigger_vite_hmr()
 
         build_status = _auto_validate_build(path)
 
@@ -417,6 +475,21 @@ def run_bash(command: str, timeout: int = 900) -> str:
             f"{', '.join(_PROTECTED_PATHS)}. "
             f"If you need to clean build artifacts, only remove: node_modules, dist, build, .next, *.log"
         )
+    
+    # Block git commands — Harness manages git automatically
+    cmd_lower = command.lower()
+    # Match git commands but allow "git log" for read-only inspection
+    git_match = re.search(r'\bgit\s+([a-z]+)', cmd_lower)
+    if git_match:
+        git_subcmd = git_match.group(1)
+        allowed_git_cmds = {"log", "status", "diff", "show", "blame"}
+        if git_subcmd not in allowed_git_cmds:
+            return (
+                f"[error] Git command 'git {git_subcmd}' is blocked. "
+                f"Harness automatically handles git commits and branch management. "
+                f"You do not need to run git commands. "
+                f"Allowed read-only commands: git log, git status, git diff"
+            )
     
     is_background = command.endswith("&") or " & " in command
     cmd_lower = command.lower()
@@ -868,64 +941,45 @@ def analyze_image(image_path: str, prompt: str = "Describe this image in detail"
 
 
 
-def delegate_task(task: str, role: str = "assistant") -> str:
-
-    """"""
-    from agents import Agent
-
-    from prompts import COMPONENT_BUILDER_SYSTEM
-
-    #     role        ?system prompt
-
-    _role_prompts = {
-
-        "component_builder": COMPONENT_BUILDER_SYSTEM,
-
+def _get_template_path(template: str) -> Path | None:
+    """Resolve template path, supporting both Docker and Windows environments."""
+    # Docker paths (Unix absolute)
+    docker_paths = {
+        "vite-react-ts": "/templates/template-vite-react-ts",
+        "nextjs-app": "/templates/template-nextjs-app",
+        "pure-html": "/templates/template-pure-html",
     }
+    # Windows fallback: check relative to project root
+    win_paths = {
+        "vite-react-ts": Path("templates/template-vite-react-ts").resolve(),
+        "nextjs-app": Path("templates/template-nextjs-app").resolve(),
+        "pure-html": Path("templates/template-pure-html").resolve(),
+    }
+    # Check Docker path first
+    docker_path_str = docker_paths.get(template)
+    if docker_path_str:
+        docker_path = Path(docker_path_str)
+        if docker_path.exists():
+            return docker_path
+    # Fallback to Windows path
+    win_path = win_paths.get(template)
+    if win_path and win_path.exists():
+        return win_path
+    return None
 
-    if role in _role_prompts:
-
-        system_prompt = _role_prompts[role]
-
-    else:
-
-        system_prompt = (
-
-            f"You are a sub-agent with role: {role}. "
-
-            f"Complete the task and provide a concise summary."
-
-        )
-
-    sub = Agent(
-        name=f"sub_{role}",
-        system_prompt=system_prompt,
-        tools=TOOL_SCHEMAS,
-        logger=log,
-    )
-
-    result = sub.run(task)
-
-    if len(result) > 8000:
-
-        result = result[:8000] + "\n...(truncated)"
-
-    return result
 
 def project_init(template: str) -> str:
     """Initialize project by copying a pre-cached template."""
     import shutil
     ws = Path(config.WORKSPACE)
-    templates = {
-        "vite-react-ts": "/templates/template-vite-react-ts",
-        "nextjs-app": "/templates/template-nextjs-app",
-    }
-    src = templates.get(template)
-    if not src:
-        return f"[error] Unknown template: {template}. Available: {list(templates.keys())}"
-    src_path = Path(src)
-    if not src_path.exists():
-        return f"[error] Template not found at {src}. Falling back to manual project setup."
+    src_path = _get_template_path(template)
+    if src_path is None:
+        available = ["vite-react-ts", "nextjs-app", "pure-html"]
+        return (
+            f"[error] Template not found: {template}. "
+            f"Available: {available}. "
+            f"Templates are pre-cached in Docker. On Windows, run from Docker or create project manually."
+        )
     try:
         # Copy template files to workspace
         for item in src_path.iterdir():
@@ -944,6 +998,15 @@ def project_init(template: str) -> str:
             shutil.rmtree(nm_path)
         if lock_path.exists():
             lock_path.unlink()
+        # Pure HTML template needs no npm install
+        if template == "pure-html":
+            return (
+                f"[BUILD OK] Project initialized from {template} template.\n"
+                f"No build step required — write your code directly to index.html.\n\n"
+                f"--- Environment Verification ---\n"
+                f"✓ Pure HTML — no dependencies needed"
+            )
+        
         # Run npm install
         install_result = run_bash("npm install 2>&1", timeout=180)
         
@@ -959,15 +1022,20 @@ def project_init(template: str) -> str:
             # Try to fix
             run_bash("npm install typescript --save-dev 2>&1", timeout=60)
         
-        # Check key dependencies
-        deps_check = run_bash("npm ls react vite 2>&1 | head -5", timeout=30)
-        if "empty" not in deps_check.lower():
+        # Check key dependencies (cross-platform: avoid Unix head/tail)
+        deps_check = run_bash("npm ls react vite 2>&1", timeout=30)
+        deps_lines = deps_check.splitlines()[:5]
+        deps_summary = "\n".join(deps_lines)
+        if "empty" not in deps_summary.lower():
             verification.append(f"✓ Key dependencies installed")
         else:
             verification.append(f"✗ Dependencies missing")
         
         # Check build works — STRICT: fail fast if build doesn't pass
-        build_check = run_bash("npm run build 2>&1 | tail -20", timeout=180)
+        # Cross-platform: capture full output and truncate in Python instead of using tail
+        build_full = run_bash("npm run build 2>&1", timeout=180)
+        build_lines = build_full.splitlines()
+        build_check = "\n".join(build_lines[-20:]) if len(build_lines) > 20 else build_full
         exit_code_match = __import__('re').search(r'\[exit code:\s*(\d+)\]', build_check)
         exit_code = int(exit_code_match.group(1)) if exit_code_match else None
         build_has_error = (
@@ -1082,140 +1150,16 @@ def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int =
     else:
         kwargs["start_new_session"] = True
     _dev_server_proc = subprocess.Popen(command, **kwargs)
-    _server_pids[port] = _dev_server_proc.pid
     time.sleep(wait)
     try:
         import urllib.request
         req = urllib.request.Request(f"http://localhost:{port}", method="HEAD")
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
-                return f"Server running on port {port} (pid {_dev_server_proc.pid})"
-            return f"[error] Server started (pid {_dev_server_proc.pid}) but health check failed. HTTP status: {resp.status}."
+                return f"Server running on port {port}"
+            return f"[error] Server started but health check failed. HTTP status: {resp.status}."
     except Exception as e:
         return f"[error] Health check failed: {e}"
-
-
-
-
-def _smart_truncate_browser_result(result: str, max_chars: int = 4000) -> str:
-
-    """"""
-    if len(result) <= max_chars:
-
-        return result
-
-    lines = result.splitlines()
-
-    important_lines = []
-
-    js_eval_budget = 800  # JS eval     ?    js_eval_used = 0
-
-    visible_text_kept = False
-
-    for line in lines:
-
-        #             
-
-        if any(line.startswith(prefix) for prefix in [
-
-            "Viewport:", "Navigated to", "Final URL:", "Screenshot saved",
-
-            "[error]", "Console errors", "Server started",
-
-        ]):
-
-            important_lines.append(line)
-
-        #     JS eval
-
-        elif line.startswith("JS eval:"):
-
-            if js_eval_used < js_eval_budget:
-
-                content = line[8:].strip()  #     "JS eval: "    
-
-                if len(content) > 200:
-
-                    line = f"JS eval: {content[:200]}..."
-
-                important_lines.append(line)
-
-                js_eval_used += len(line)
-
-        #        ?Visible text
-
-        elif line.startswith("Visible text:"):
-
-            if not visible_text_kept:
-
-                content = line[13:].strip()
-
-                if len(content) > 300:
-
-                    line = f"Visible text: {content[:300]}..."
-
-                important_lines.append(line)
-
-                visible_text_kept = True
-
-        #                         
-
-        elif len(line) < 200:
-
-            important_lines.append(line)
-
-    summary = "\n".join(important_lines)
-
-    if len(summary) > max_chars:
-
-        summary = summary[:max_chars] + "\n...[TRUNCATED: key info preserved]"
-
-    return summary
-
-
-
-
-def browser_test(
-    url: str,
-    actions: list | None = None,
-    screenshot: bool = True,
-    start_command: str | None = None,
-    port: int = 5173,
-    startup_wait: int = 8,
-    viewport: dict | None = None,
-) -> str:
-    """Browser test using Playwright MCP server."""
-    from tools.playwright_mcp import browser_test_mcp
-
-    # FIX: LLM sometimes passes actions as a JSON string instead of a list.
-    # Defensively parse it to prevent 'str' object has no attribute 'get' crash.
-    if isinstance(actions, str):
-        try:
-            actions = json.loads(actions)
-        except json.JSONDecodeError:
-            actions = None
-    if isinstance(viewport, str):
-        try:
-            viewport = json.loads(viewport)
-        except json.JSONDecodeError:
-            viewport = None
-
-    if start_command:
-        server_result = start_dev_server(start_command, port, startup_wait)
-        if server_result.startswith("[error]"):
-            return server_result
-    try:
-        return browser_test_mcp(
-            url=url,
-            actions=actions,
-            screenshot=screenshot,
-            viewport=viewport,
-        )
-    except Exception as e:
-        # FIX BUG #5: Only kill the dev server we started, not all global servers
-        if start_command:
-            _kill_port(port)
-        return f"[error] Browser test failed: {e}"
 
 def browser_check(
     url: str = "http://localhost:5173",
@@ -1259,6 +1203,33 @@ def browser_check(
         )
     except Exception as e:
         return f"[error] Browser check failed: {e}"
+
+
+def browser_test(
+    url: str,
+    actions: list | None = None,
+    screenshot: bool = True,
+    start_command: str | None = None,
+    port: int = 5173,
+    startup_wait: int = 8,
+    viewport: dict | None = None,
+) -> str:
+    """Backward-compatible wrapper for browser_check (interact mode).
+    
+    DEPRECATED: Use browser_check(mode='interact') directly.
+    """
+    if start_command:
+        server_result = start_dev_server(start_command, port, startup_wait)
+        if server_result.startswith("[error]"):
+            return server_result
+    return browser_check(
+        url=url,
+        mode="interact",
+        actions=actions,
+        screenshot=screenshot,
+        viewport=viewport,
+        wait=startup_wait,
+    )
 
 
 TOOL_SCHEMAS = [
@@ -1405,33 +1376,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "delegate_task",
-            "description": (
-                "Delegate a self-contained coding task to a sub-agent. "
-                "Use for large components (>100 lines) or complex logic that can be written independently. "
-                "Provide a detailed spec including props, file path, and integration notes. "
-                "The sub-agent will write the file and return a summary."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "Detailed task description with file path, props interface, and behavior.",
-                    },
-                    "role": {
-                        "type": "string",
-                        "description": "Role for the sub-agent. Default: 'component_builder'.",
-                        "default": "component_builder",
-                    },
-                },
-                "required": ["task"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "validate_build",
             "description": (
                 "Explicitly run build validation (npm run build) and return the result. "
@@ -1458,8 +1402,8 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "template": {
                         "type": "string",
-                        "description": "Template name. Options: 'vite-react-ts', 'nextjs-app'.",
-                        "enum": ["vite-react-ts", "nextjs-app"],
+                        "description": "Template name. Options: 'pure-html' (single file, no build), 'vite-react-ts', 'nextjs-app'.",
+                        "enum": ["pure-html", "vite-react-ts", "nextjs-app"],
                     },
                 },
                 "required": ["template"],
@@ -1469,46 +1413,6 @@ TOOL_SCHEMAS = [
 ]
 
 BROWSER_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_test",
-            "description": (
-                "Test the app in a headless Chromium browser. "
-                "Call twice for web apps: once with default viewport (desktop 1280x720) "
-                "and once with viewport={\"width\": 375, \"height\": 812} for mobile. "
-                "For each call, provide one action per functional criterion to verify."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string"},
-                    "actions": {
-                        "type": "array",
-                        "description": (
-                            "List of actions. Each action is an object with 'type' "
-                            "(click|fill|wait|evaluate|scroll), optional 'selector', 'value', 'delay'. "
-                            "Use evaluate to run JS and capture return values."
-                        ),
-                    },
-                    "screenshot": {"type": "boolean", "default": True},
-                    "start_command": {
-                        "type": "string",
-                        "description": "DEPRECATED: Use start_dev_server() instead. This field is kept for backward compatibility."
-                    },
-                    "viewport": {
-                        "type": "object",
-                        "description": "Browser viewport size. Default: {\"width\": 1280, \"height\": 720}. Use {\"width\": 375, \"height\": 812} for mobile.",
-                        "properties": {
-                            "width": {"type": "integer"},
-                            "height": {"type": "integer"},
-                        },
-                    },
-                },
-                "required": ["url"]
-            }
-        }
-    },
     {
         "type": "function",
         "function": {
@@ -1554,7 +1458,7 @@ BROWSER_TOOL_SCHEMAS = [
                     },
                     "actions": {
                         "type": "array",
-                        "description": "Action chain for mode='interact'. Each action: {type: 'click'|'fill'|'wait'|'scroll'|'evaluate', selector?, value?, delay?}",
+                        "description": "Action chain for mode='interact'. Each action: {type: 'click'|'fill'|'wait'|'scroll'|'evaluate'|'upload', selector?, value?, delay?, files?}. For 'upload': {type: 'upload', selector: 'input[type=file]', files: [{name: 'test.mp3', type: 'audio/mpeg', content: ''}]}",
                     },
                     "script": {
                         "type": "string",
@@ -1636,14 +1540,12 @@ TOOL_DISPATCH = {
     "edit_file": edit_file,
     "list_files": list_files,
     "run_bash": run_bash,
-    "browser_test": browser_test,
     "browser_check": browser_check,
     "read_skill_file": read_skill_file,
     "generate_image": generate_image,
     "start_dev_server": start_dev_server,
     "search_web": search_web,
     "analyze_image": analyze_image,
-    "delegate_task": delegate_task,
     "validate_build": validate_build,
     "project_init": project_init,
 }

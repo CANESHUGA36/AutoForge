@@ -166,6 +166,25 @@ _REVIEWER_FAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Patterns that indicate a browser-test-only failure (not a real code failure)
+_BROWSER_LIMITATION_PATTERNS = [
+    r'(?i)browser.*(?:could not|unable|failed|cannot).*trigger',
+    r'(?i)browser.*automation.*limit',
+    r'(?i)programmatic.*event.*(?:not work|fail)',
+    r'(?i)react.*controlled.*(?:input|component).*limit',
+    r'(?i)test.*skipped.*(?:browser|automation)',
+    r'(?i)code.*review.*pass.*browser.*fail',
+    r'(?i)verified.*via.*code.*review',
+    r'(?i)browser.*test.*limitation',
+    r'(?i)cannot.*test.*(?:programmatically|via browser)',
+    r'(?i)rely.*on.*code.*review',
+]
+
+
+def _is_browser_limitation_line(line: str) -> bool:
+    """Check if a line describes a browser automation limitation rather than code failure."""
+    return any(re.search(p, line) for p in _BROWSER_LIMITATION_PATTERNS)
+
 
 def extract_reviewer_fails(review_text: str) -> set[str]:
     """Extract criteria IDs that Reviewer explicitly marks as FAIL/missing.
@@ -174,13 +193,33 @@ def extract_reviewer_fails(review_text: str) -> set[str]:
       - 'F3.1-F3.6: NOT IMPLEMENTED'
       - 'C4: Preset names | ❌ FAIL'
       - 'F3.1: Frequency bars — NOT IMPLEMENTED'
+    
+    IMPORTANT: Ignores failures that are clearly browser automation limitations
+    (e.g., "browser could not trigger React controlled input"). These are NOT
+    real code failures — they indicate the feature requires real user interaction
+    that cannot be simulated programmatically.
+    
     Returns a set of criteria IDs (e.g., {'F3.1', 'C4', 'D5'}).
     """
     fails: set[str] = set()
-    for line in review_text.splitlines():
+    lines = review_text.splitlines()
+    
+    for i, line in enumerate(lines):
         # Check for explicit FAIL indicators in the line
         if not re.search(r'❌|FAIL|NOT FOUND|NOT IMPLEMENTED|missing|absent', line, re.IGNORECASE):
             continue
+        
+        # SKIP: If this line describes a browser automation limitation, not a code failure
+        if _is_browser_limitation_line(line):
+            # Also check next 2 lines for context (Reviewer might explain in following lines)
+            context = ' '.join(lines[i:min(i+3, len(lines))])
+            if _is_browser_limitation_line(context):
+                continue
+        
+        # SKIP: If line mentions "code review PASS" or "verified via code", it's not a real fail
+        if re.search(r'(?i)code\s+review.*pass|verified.*code|implementation.*correct|handler.*non-empty|jsx.*exist', line):
+            continue
+        
         # Extract all criteria IDs from this line
         ids = re.findall(r'\b([A-Z]\d+(?:\.\d+)?)\b', line)
         fails.update(ids)

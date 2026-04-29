@@ -15,6 +15,10 @@ services:
       - ./prompts:/app/prompts:ro
       - ./skills:/app/skills:ro
       - ./harness:/app/harness:ro
+      - ./tools:/app/tools:ro
       - ./config.py:/app/config.py:ro
+      - ./agents.py:/app/agents.py:ro
+      - ./tools_impl.py:/app/tools_impl.py:ro
+      - ./prompts.py:/app/prompts.py:ro
     # Default command - override with: docker compose run autoforge python run.py "your prompt"
     command: ["python", "run.py"]

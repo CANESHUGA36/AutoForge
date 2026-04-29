@@ -10,7 +10,10 @@ log = logging.getLogger("harness")
 
 
 class PreBuildGateStage(PipelineStage):
-    """预检阶段：验证环境完整性。"""
+    """预检阶段：验证环境完整性。
+    
+    纯 HTML 项目不需要 node/npm 环境，直接跳过。
+    """
     name = "prebuild_gate"
     allow_auto_fix = True
     timeout_seconds = 120
@@ -18,13 +21,12 @@ class PreBuildGateStage(PipelineStage):
     def run(self) -> StageResult:
         checks = []
 
-        # 检查 1: package.json
+        # 纯 HTML 项目不需要环境检查
         pkg = self.workspace / "package.json"
         if not pkg.exists():
             return StageResult(
-                success=False,
-                message="No package.json found",
-                payload={"missing": "package.json", "auto_fix": "project_init"}
+                success=True,
+                message="Pure HTML project — no build environment needed"
             )
         checks.append("package.json OK")
 
@@ -76,7 +78,15 @@ class PreBuildGateStage(PipelineStage):
 
         pkg = self.workspace / "package.json"
         if not pkg.exists():
-            # 空项目：需要初始化
+            # 纯 HTML 项目不需要修复
+            return StageResult(
+                success=True,
+                message="Pure HTML project — no build environment needed"
+            )
+
+        # Check if node_modules exists — if not, project needs initialization
+        nm = self.workspace / "node_modules"
+        if not nm.exists():
             log.info("[prebuild_gate] Auto-fix: initializing project from template...")
             init_result = project_init("vite-react-ts")
             if init_result.startswith("[error]"):
@@ -85,14 +95,13 @@ class PreBuildGateStage(PipelineStage):
                     message=f"Project init failed: {init_result[:300]}",
                     payload={"init_output": init_result},
                 )
-            # project_init 已经验证构建通过，直接返回成功
             return StageResult(
                 success=True,
                 message="Project initialized and build passes",
                 payload={"init_output": init_result},
             )
 
-        # package.json 存在但依赖可能缺失
+        # package.json 存在且 node_modules 存在，但构建可能失败
         result = run_bash("npm install 2>&1", timeout=180)
         if result.startswith("[error]"):
             return StageResult(success=False, message=f"npm install failed: {result}")
@@ -110,34 +119,92 @@ class PreBuildGateStage(PipelineStage):
 
 
 class BuildGateStage(PipelineStage):
-    """构建检查阶段：验证 npm run build 通过。"""
+    """构建检查阶段：验证 npm run build 通过 + 防御性编码静态检查。"""
     name = "build_gate"
     timeout_seconds = 300
 
     def run(self) -> StageResult:
-        from tools_impl import validate_build
+        from tools_impl import validate_build, run_bash
+
+        # ── 检查 1: 构建验证 ──
         result = validate_build()
-        if "[BUILD OK]" in result:
+        if "[BUILD OK]" not in result:
             return StageResult(
-                success=True,
-                message="Build passed",
-                payload={"build_output": result}
+                success=False,
+                message="Build failed",
+                payload={"build_output": result},
+                should_skip_remaining=True
             )
+
+        # ── 检查 2: 防御性编码 —— 禁止 React 条件渲染 ──
+        # 纯 HTML 项目跳过此检查
+        pkg = self.workspace / "package.json"
+        if pkg.exists():
+            jsx_files = list(self.workspace.rglob("*.tsx")) + list(self.workspace.rglob("*.jsx"))
+            # 排除 node_modules 和 .next/.vite 构建输出
+            jsx_files = [
+                f for f in jsx_files
+                if "node_modules" not in str(f) and ".next" not in str(f) and ".vite" not in str(f)
+            ]
+
+            violations = []
+            for f in jsx_files:
+                content = f.read_text(encoding="utf-8")
+                lines = content.splitlines()
+                for i, line in enumerate(lines, 1):
+                    stripped = line.strip()
+                    # 检测 JSX 中的条件渲染模式：{condition && <Element} 或 {condition ? <Element> : ...}
+                    # 排除注释行和字符串中的模式
+                    if stripped.startswith("//") or stripped.startswith("*"):
+                        continue
+                    # 简单启发式：行内同时包含 JSX 标签和条件运算符
+                    if ("&&" in stripped or "?" in stripped) and ("<" in stripped or "</" in stripped):
+                        # 进一步确认：排除合法场景（如对象展开、类型定义）
+                        # 条件渲染的特征：{ 开头，&& 或 ? 后面紧跟 <
+                        if stripped.startswith("{") and ("&& <" in stripped or "? <" in stripped or "&&<" in stripped or "?<" in stripped):
+                            rel_path = f.relative_to(self.workspace)
+                            violations.append(f"  {rel_path}:{i}: {stripped[:80]}")
+
+            if violations:
+                # 不阻塞构建，但记录警告供 Reviewer 关注
+                log.warning(
+                    f"[build_gate] Found {len(violations)} potential conditional render patterns "
+                    f"(Reviewer may fail to find these elements):\n" + "\n".join(violations[:10])
+                )
+                # 如果违规较多，标记为需要关注
+                if len(violations) >= 3:
+                    return StageResult(
+                        success=True,  # 构建本身通过
+                        message=f"Build passed, BUT {len(violations)} conditional render patterns detected",
+                        payload={
+                            "build_output": result,
+                            "conditional_render_warnings": violations[:20],
+                            "note": "Builder used conditional rendering ({condition && <Element>}) which makes elements invisible to Reviewer DOM queries. This often causes 0% scores.",
+                        },
+                    )
+
         return StageResult(
-            success=False,
-            message="Build failed",
-            payload={"build_output": result},
-            should_skip_remaining=True
+            success=True,
+            message="Build passed",
+            payload={"build_output": result}
         )
 
 
 class DevServerGateStage(PipelineStage):
-    """Dev Server 检查阶段：确保服务器可访问。"""
+    """Dev Server 检查阶段：确保服务器可访问。
+    
+    纯 HTML 项目不需要 dev server，直接跳过。
+    """
     name = "dev_server_gate"
     allow_auto_fix = True
     timeout_seconds = 60
 
     def run(self) -> StageResult:
+        # 纯 HTML 项目不需要 dev server
+        pkg = self.workspace / "package.json"
+        if not pkg.exists():
+            return StageResult(success=True, message="Pure HTML project — no dev server needed")
+        
         from harness.build import verify_dev_server
         ok, msg = verify_dev_server(self.workspace)
         if ok:
@@ -150,6 +217,11 @@ class DevServerGateStage(PipelineStage):
 
     def auto_fix(self) -> StageResult:
         """自动启动 dev server。"""
+        # 纯 HTML 项目不需要 dev server
+        pkg = self.workspace / "package.json"
+        if not pkg.exists():
+            return StageResult(success=True, message="Pure HTML project — no dev server needed")
+        
         from tools_impl import start_dev_server
         from harness.build import _detect_project_port
         import config
@@ -169,12 +241,21 @@ class ScreenshotGateStage(PipelineStage):
 
     def run(self) -> StageResult:
         try:
-            from tools.playwright_mcp import browser_test_mcp
+            from tools_impl import browser_check
             from harness.build import _detect_project_port
-            port = _detect_project_port(self.workspace)
-            result = browser_test_mcp(
-                url=f"http://localhost:{port}",
-                actions=[{"type": "wait", "delay": 2000}],
+            
+            # 纯 HTML 项目使用 file:// 协议
+            pkg = self.workspace / "package.json"
+            if pkg.exists():
+                port = _detect_project_port(self.workspace)
+                url = f"http://localhost:{port}"
+            else:
+                url = f"file://{self.workspace}/index.html"
+            
+            result = browser_check(
+                url=url,
+                mode="screenshot",
+                wait=2,
                 screenshot=True,
             )
             has_error = "[error]" in result
@@ -203,31 +284,4 @@ class GitCommitStage(PipelineStage):
         )
 
 
-class ReviewStage(PipelineStage):
-    """Reviewer Agent 阶段。"""
-    name = "review"
-    timeout_seconds = 1800  # 30 min
 
-    def run(self) -> StageResult:
-        # ReviewStage 需要访问 Harness 的 Agent 实例
-        # 由于 Stage 是独立类，这里通过 payload 传递 Reviewer 结果
-        # 实际调用在 Harness._build_round 中处理
-        return StageResult(
-            success=True,
-            message="Review delegated to Harness",
-            payload={"delegated": True}
-        )
-
-
-class JudgeStage(PipelineStage):
-    """Judge Agent 阶段。"""
-    name = "judge"
-    timeout_seconds = 600  # 10 min
-
-    def run(self) -> StageResult:
-        # JudgeStage 同样需要 Harness 的 Agent 实例
-        return StageResult(
-            success=True,
-            message="Judge delegated to Harness",
-            payload={"delegated": True}
-        )

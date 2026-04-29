@@ -19,18 +19,17 @@ from harness.stages import (
 # --------------------------------------------------------------------------- #
 
 class TestPreBuildGateStage:
-    def test_missing_package_json(self, mock_workspace):
+    def test_missing_package_json_pure_html(self, mock_workspace):
+        """Pure HTML project without package.json should pass immediately."""
         bus = EventBus(mock_workspace)
         stage = PreBuildGateStage(mock_workspace, bus, 1)
-        with patch("tools_impl.project_init") as mock_init:
-            mock_init.return_value = "[BUILD OK] Project initialized."
-            result = stage.execute()
+        result = stage.execute()
         assert result.success is True
-        assert "initialized" in result.message
-        mock_init.assert_called_once_with("vite-react-ts")
+        assert "Pure HTML" in result.message
 
     def test_missing_node_modules(self, mock_workspace):
         (mock_workspace / "package.json").write_text('{"name": "test"}')
+        (mock_workspace / "node_modules").mkdir()
         bus = EventBus(mock_workspace)
         stage = PreBuildGateStage(mock_workspace, bus, 1)
         with patch("tools_impl.run_bash") as mock_bash:
@@ -82,19 +81,23 @@ class TestPreBuildGateStage:
         assert result.success is True
 
     def test_auto_fix_project_init(self, mock_workspace):
-        """空项目时 auto_fix 应调用 project_init 初始化项目。"""
+        """空项目（有 package.json 但没有 node_modules）时 auto_fix 应调用 project_init 初始化项目。"""
+        (mock_workspace / "package.json").write_text('{"name": "test"}')
         bus = EventBus(mock_workspace)
         stage = PreBuildGateStage(mock_workspace, bus, 1)
-        with patch("tools_impl.project_init") as mock_init:
+        with patch("tools_impl.project_init") as mock_init, \
+             patch("tools_impl.validate_build") as mock_build:
             mock_init.return_value = "[BUILD OK] Project initialized from vite-react-ts template."
+            mock_build.return_value = "[BUILD OK] Build passes"
             result = stage.execute()
             assert result.success is True
             assert "Project initialized" in result.message
             mock_init.assert_called_once_with("vite-react-ts")
 
     def test_auto_fix_triggers_npm_install(self, mock_workspace):
-        """package.json 存在但构建失败时，auto_fix 应运行 npm install。"""
+        """package.json 存在且 node_modules 存在但构建失败时，auto_fix 应运行 npm install。"""
         (mock_workspace / "package.json").write_text('{"name": "test"}')
+        (mock_workspace / "node_modules").mkdir()
         bus = EventBus(mock_workspace)
         stage = PreBuildGateStage(mock_workspace, bus, 1)
         with patch("tools_impl.run_bash") as mock_bash, \
@@ -163,6 +166,8 @@ class TestDevServerGateStage:
             assert result.success is True
 
     def test_server_not_running_triggers_auto_fix(self, mock_workspace):
+        # Create a mock package.json so it's not treated as pure HTML
+        (mock_workspace / "package.json").write_text('{"dependencies": {}}')
         bus = EventBus(mock_workspace)
         stage = DevServerGateStage(mock_workspace, bus, 1)
         with patch("harness.build.verify_dev_server") as mock_verify, \
@@ -176,6 +181,8 @@ class TestDevServerGateStage:
             assert "Server started" in result.message
 
     def test_server_start_fails(self, mock_workspace):
+        # Create a mock package.json so it's not treated as pure HTML
+        (mock_workspace / "package.json").write_text('{"dependencies": {}}')
         bus = EventBus(mock_workspace)
         stage = DevServerGateStage(mock_workspace, bus, 1)
         with patch("harness.build.verify_dev_server") as mock_verify, \
@@ -196,7 +203,7 @@ class TestScreenshotGateStage:
     def test_screenshot_success(self, mock_workspace):
         bus = EventBus(mock_workspace)
         stage = ScreenshotGateStage(mock_workspace, bus, 1)
-        with patch("tools.playwright_mcp.browser_test_mcp") as mock_browser:
+        with patch("tools_impl.browser_check") as mock_browser:
             mock_browser.return_value = "Page loaded successfully"
             result = stage.execute()
             assert result.success is True  # never blocks
@@ -205,7 +212,7 @@ class TestScreenshotGateStage:
     def test_screenshot_error_not_blocking(self, mock_workspace):
         bus = EventBus(mock_workspace)
         stage = ScreenshotGateStage(mock_workspace, bus, 1)
-        with patch("tools.playwright_mcp.browser_test_mcp") as mock_browser:
+        with patch("tools_impl.browser_check") as mock_browser:
             mock_browser.return_value = "[error] page not found"
             result = stage.execute()
             assert result.success is True  # still not blocking
@@ -214,7 +221,7 @@ class TestScreenshotGateStage:
     def test_screenshot_exception_not_blocking(self, mock_workspace):
         bus = EventBus(mock_workspace)
         stage = ScreenshotGateStage(mock_workspace, bus, 1)
-        with patch("tools.playwright_mcp.browser_test_mcp") as mock_browser:
+        with patch("tools_impl.browser_check") as mock_browser:
             mock_browser.side_effect = Exception("browser crashed")
             result = stage.execute()
             assert result.success is True

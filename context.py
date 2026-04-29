@@ -23,14 +23,19 @@ except ImportError:
 
 
 def _get_encoder():
-    global _encoder
+    global _encoder, _use_tiktoken
     if not _use_tiktoken:
         return None
     if _encoder is None:
         try:
             _encoder = tiktoken.encoding_for_model(config.MODEL)
         except Exception:
-            _encoder = tiktoken.get_encoding("cl100k_base")
+            try:
+                _encoder = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                log.warning("tiktoken encoder unavailable (network or model issue); falling back to character estimate")
+                _use_tiktoken = False
+                return None
     return _encoder
 
 
