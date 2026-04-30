@@ -2,6 +2,7 @@
 from __future__ import annotations
 import base64
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -13,6 +14,8 @@ from pathlib import Path
 import requests
 import config
 from skills import get_skill_path
+
+log = logging.getLogger("harness")
 
 _BUILDABLE_EXTENSIONS = {".tsx", ".ts", ".jsx", ".js", ".css", ".scss"}
 _dev_server_proc = None
@@ -1089,8 +1092,14 @@ def _kill_port(port: int) -> None:
 
 def _kill_dev_server() -> None:
     """Kill dev server and clear build caches to prevent stale content."""
-    _kill_port(3000)
-    _kill_port(5173)
+    # FIX: Kill ALL common dev server ports to prevent multiple Vite processes
+    # from competing for the same cache directory.
+    for p in (3000, 5173, 5174, 5175, 5176, 5177, 5178, 5179, 5180,
+              5181, 5182, 5183, 5184, 5185, 5186, 5187, 5188, 5189, 5190):
+        _kill_port(p)
+    # Also kill any process holding vite-related file locks
+    if os.name != "nt":
+        run_bash("pkill -f 'vite' 2>/dev/null || true", timeout=10)
     # Give processes time to release file locks before clearing cache
     time.sleep(2)
     # FIX: Clear Turbopack dev cache so the next dev server restart
@@ -1129,16 +1138,29 @@ def _kill_dev_server() -> None:
             except Exception:
                 pass
 
-def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int = 15) -> str:
-    """启动 dev server。
-
-    注意：BuildGateStage 已经验证过构建通过，此处不再重复运行 npm run build，
-    也不再无条件删除 .next 缓存（这会强制 Next.js 重新编译，显著增加启动时间）。
+def _restart_dev_server_if_running() -> None:
+    """If a dev server is already running, kill and restart it to pick up latest file changes.
+    
+    This is called automatically after Builder writes/edits files to ensure Vite serves
+    the latest code instead of stale cached modules.
     """
     global _dev_server_proc
-    ws = Path(config.WORKSPACE)
-    _kill_port(port)
-    time.sleep(1)
+    if _dev_server_proc is None:
+        return
+    try:
+        # Check if process is still alive
+        if _dev_server_proc.poll() is not None:
+            _dev_server_proc = None
+            return
+    except Exception:
+        _dev_server_proc = None
+        return
+    
+    log.info("[dev_server] Auto-restarting after file change...")
+    _kill_dev_server()
+    time.sleep(2)
+    
+    # Restart with same parameters
     kwargs = {
         "shell": True,
         "cwd": config.WORKSPACE,
@@ -1149,7 +1171,45 @@ def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int =
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    _dev_server_proc = subprocess.Popen(command, **kwargs)
+    
+    # Use --force for Vite to invalidate cache
+    cmd = "npm run dev --force"
+    _dev_server_proc = subprocess.Popen(cmd, **kwargs)
+    time.sleep(8)  # Shorter wait for restart vs cold start
+    log.info("[dev_server] Auto-restart complete")
+
+
+def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int = 15) -> str:
+    """启动 dev server。
+
+    注意：BuildGateStage 已经验证过构建通过，此处不再重复运行 npm run build，
+    也不再无条件删除 .next 缓存（这会强制 Next.js 重新编译，显著增加启动时间）。
+    """
+    global _dev_server_proc
+    ws = Path(config.WORKSPACE)
+    _kill_dev_server()
+    time.sleep(1)
+    
+    # FIX: For Vite projects, add --force flag to invalidate dependency pre-bundling cache.
+    # This ensures stale compiled modules are re-built from disk files.
+    # Only add if command looks like a Vite dev command and doesn't already have --force.
+    effective_command = command
+    if "vite" in command.lower() or "npm run dev" in command.lower() or "npx vite" in command.lower():
+        if "--force" not in command:
+            effective_command = command + " --force"
+            log.info(f"[dev_server] Added --force flag for Vite cache invalidation: {effective_command}")
+    
+    kwargs = {
+        "shell": True,
+        "cwd": config.WORKSPACE,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    _dev_server_proc = subprocess.Popen(effective_command, **kwargs)
     time.sleep(wait)
     try:
         import urllib.request

@@ -195,4 +195,4 @@ OVERALL_PASS_RATE: XX%
 2. 如果 Reviewer 提到"Vite 缓存"但已重启仍无效 → feedback 中必须纠正为"条件渲染"
 3. 如果 Reviewer 提到"JSX 缺失" → feedback 中要求 Builder 实现对应 JSX
 
-使用 write_file 保存到 feedback.md。
+使用 write_file 保存到 `{{WORKSPACE}}/feedback.md`（必须是 workspace 根目录，不是 .eval_cache 子目录）。

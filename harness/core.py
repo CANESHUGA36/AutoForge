@@ -59,15 +59,15 @@ class Harness:
         #     Agent（按职能细分工具集）
         CORE_TOOLS = {"read_file", "write_file", "read_skill_file"}
         FILE_TOOLS = {"edit_file", "list_files"}
-        EXEC_TOOLS = {"run_bash", "start_dev_server"}
+        EXEC_TOOLS = {"run_bash"}
         BROWSER_TOOLS = {"browser_check"}
         GEN_TOOLS = {"generate_image", "search_web", "analyze_image"}
         META_TOOLS = {"validate_build", "project_init"}
 
         architect_tools = CORE_TOOLS | GEN_TOOLS | {"search_web"}
         sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
-        builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS | BROWSER_TOOLS
-        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"start_dev_server"}
+        builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS
+        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS
         judge_tools = CORE_TOOLS | {"read_file", "write_file", "read_skill_file"}
 
         self.architect = Agent("Architect", ARCHITECT_SYSTEM, TOOL_SCHEMAS, allowed_tools=architect_tools, logger=self.log)
@@ -233,6 +233,26 @@ class Harness:
             exit_ok, exit_reason = self._check_exit_condition()
             if exit_ok:
                 self.log.info(f"\nSuccess! {exit_reason}")
+                
+                # ===== FINAL REVIEW PHASE =====
+                # After tier1+tier2 pass, run a comprehensive review of ALL criteria
+                # to catch regressions, bugs, and missed D/T standards.
+                final_review_result = self._run_final_review(round_num)
+                if final_review_result.get("issues_found"):
+                    self.log.warning(
+                        f"[final_review] Issues found: {final_review_result['issues_found']} "
+                        f"regressions, {final_review_result.get('dt_failures', 0)} D/T failures. "
+                        f"Running final fix round."
+                    )
+                    # Run one final fix round
+                    fix_result = self._run_final_fix_round(round_num, final_review_result)
+                    # Update final score with fix results
+                    score = fix_result.get("score", score)
+                    contract_rate = fix_result.get("contract_rate", contract_rate)
+                    sprint_rate = fix_result.get("sprint_rate", sprint_rate)
+                else:
+                    self.log.info("[final_review] No issues found — project is clean.")
+                
                 log_final_stats(self.log, self.round_stats, self.sprint_score_history,
                                self.overall_score_history, self.token_totals)
                 self._clear_state()
@@ -407,6 +427,26 @@ class Harness:
 
         # ScreenshotGate 和 GitCommit 已在 Pipeline 中完成（不阻塞）
 
+        # ===== FIX: Restart dev server BEFORE Reviewer to ensure fresh compile =====
+        # Builder may have modified files; Vite HMR can fail in certain edge cases.
+        # Restarting guarantees Reviewer sees the latest code.
+        self.log.info("[dev_server] Restarting dev server before Reviewer...")
+        from tools_impl import _kill_dev_server, start_dev_server
+        from harness.build import _detect_project_port
+        _kill_dev_server()
+        time.sleep(2)
+        pkg = self.workspace / "package.json"
+        if pkg.exists():
+            port = _detect_project_port(self.workspace)
+            wait = max(getattr(config, 'DEV_SERVER_DEFAULT_WAIT', 8), 15)
+            # Use --force flag to ensure Vite invalidates all caches
+            result = start_dev_server("npm run dev --force", port=port, wait=wait)
+            if not result.startswith("[error]"):
+                self.log.info(f"[dev_server] Restarted on port {port} for Reviewer")
+            else:
+                self.log.warning(f"[dev_server] Restart failed: {result}")
+        time.sleep(1)
+
         # ===== Evaluate =====
         return self._run_evaluation(round_num, round_start, build_usage, strategy)
 
@@ -571,11 +611,11 @@ class Harness:
         return adaptive_budget, strategy_hint
 
     def _run_evaluation(self, round_num: int, round_start: float, build_usage: dict, strategy: dict) -> dict:
-        """运行 Reviewer + Judge 评估阶段（双轨评分版）。"""
+        """运行 Reviewer 评估阶段（Reviewer 直接生成 feedback.md）。"""
         contract_ref = config.CONTRACT_FILE
 
-        # Step 1: Reviewer（自适应验证深度）
-        self.log.info("Evaluate phase — Step 1: Reviewer (unified review)")
+        # Step 1: Reviewer（自适应验证深度 + 直接生成 feedback）
+        self.log.info("Evaluate phase — Step 1: Reviewer (unified review + feedback)")
         self.dashboard.start_agent("Reviewer")
 
         # Inject current feature group into Reviewer task
@@ -591,6 +631,7 @@ class Harness:
         # 自适应验证预算
         reviewer_budget, strategy_hint = self._calculate_reviewer_budget(round_num)
 
+        # FIX: Reviewer now generates feedback.md directly. No Judge involved.
         review_task = (
             f"Review the codebase and test the web app for round {round_num}.\n"
             f"{group_section}"
@@ -598,100 +639,51 @@ class Harness:
             f"Read the acceptance criteria in {contract_ref}, then:\n"
             f"1. Examine the MOST IMPORTANT source files (max 5 files) related to the current feature group.\n"
             f"2. Run browser tests. Dev server is already running.\n"
-            f"3. Produce a unified review report focused ONLY on the current feature group.\n"
+            f"3. Produce TWO outputs:\n"
+            f"   a) Save detailed review report to `.eval_cache/round_{round_num}_review.md`\n"
+            f"   b) Save feedback for Builder to `{config.FEEDBACK_FILE}` (workspace root)\n"
+            f"      The feedback must include GROUP_PASS_RATE, Passed/Failed list, and actionable fix guidance.\n"
             f"Limit: {reviewer_budget} iterations max."
         )
         review_result, review_usage = self.reviewer.run_with_stats(review_task, max_iterations=reviewer_budget)
 
-        # FIX: Detect incomplete Reviewer reports and protect against Judge over-scoring.
-        # If the Reviewer hit max iterations, its report may be partial. We mark it clearly
-        # and cap the contract rate to prevent false-high scores.
+        # Detect incomplete/error status
         reviewer_status = "success"
         if "[REVIEWER STATUS: INCOMPLETE" in review_result:
             self.log.warning(
-                f"[reviewer] Round {round_num} review is INCOMPLETE (max iterations). "
-                f"Capping contract rate to prevent over-scoring."
+                f"[reviewer] Round {round_num} review is INCOMPLETE (max iterations)."
             )
             reviewer_status = "incomplete"
-            # Prepend a clear header so Judge cannot miss the incomplete status
-            review_result = (
-                f"# ⚠️ REVIEWER REPORT — STATUS: INCOMPLETE (Round {round_num})\n\n"
-                f"**The Reviewer hit the iteration limit before completing all tests.**\n\n"
-                f"**GUIDANCE FOR JUDGE:**\n"
-                f"1. The Reviewer's browser tests may be partial or unavailable.\n"
-                f"2. You MUST read the source code yourself to perform code review.\n"
-                f"3. For conditionally-rendered features (e.g., controls that appear after upload),\n"
-                f"   the Reviewer may not have been able to trigger the condition.\n"
-                f"4. Base your scoring on: CODE EXISTENCE > browser absence for conditionally-rendered features.\n"
-                f"5. Only mark FAIL if the code itself is missing, stubbed, or obviously broken.\n"
-                f"6. Do NOT mark FAIL solely because an element is hidden in the initial DOM state.\n\n"
-                f"---\n\n"
-                f"{review_result}"
-            )
         elif review_result.startswith("[error]"):
             self.log.error(f"[reviewer] Round {round_num} review failed: {review_result[:200]}")
             reviewer_status = "error"
-            # Construct a minimal failure report so Judge has something to read
-            review_result = (
-                f"# REVIEWER REPORT — STATUS: FAILED (Round {round_num})\n\n"
-                f"**The Reviewer encountered an error and produced no test results.**\n\n"
-                f"**RULES FOR JUDGE:**\n"
-                f"1. No browser tests were performed.\n"
-                f"2. All criteria MUST be marked FAIL.\n"
-                f"3. CONTRACT_PASS_RATE = 0%.\n\n"
-                f"Original error: {review_result}\n"
-            )
 
         self.eval_cache.save_round(round_num, review_result)
         self.dashboard.end_agent(reviewer_status)
 
-        # Step 2: Judge
-        self.log.info("Evaluate phase — Step 2: Judge (pass-rate scoring)")
-        self.dashboard.start_agent("Judge")
-        # Judge reads the full Reviewer report directly from disk
-        review_report_path = self.workspace / ".eval_cache" / f"round_{round_num}_review.md"
-        review_hint = ""
-        if review_report_path.exists():
-            review_hint = (
-                f"\n\nIMPORTANT: Read the complete Reviewer report at "
-                f"`.eval_cache/round_{round_num}_review.md` before scoring. "
-                f"The Reviewer's browser test results are the highest-priority evidence.\n\n"
-            )
-        judge_task = (
-            f"Round {round_num} evaluation.\n\n"
-            f"Read {config.SPRINT_FILE}, {config.CONTRACT_FILE}, "
-            f"and any previous {config.FEEDBACK_FILE}, then produce feedback.md with pass rates."
-            f"{review_hint}"
-        )
-        judge_result, judge_usage = self.judge.run_with_stats(judge_task)
-        self.dashboard.end_agent("success")
-
-        # Parse pass rates
+        # ------------------------------------------------------------------ #
+        #  Parse pass rates from feedback.md (generated by Reviewer)
+        # ------------------------------------------------------------------ #
         feedback_path = self.workspace / config.FEEDBACK_FILE
         if feedback_path.exists():
             try:
                 eval_text = feedback_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
-                eval_text = judge_result
+                eval_text = review_result
         else:
-            eval_text = judge_result
+            # Fallback: try to parse from review result if feedback.md not written
+            eval_text = review_result
+            self.log.warning(f"[reviewer] feedback.md not found at {feedback_path}, parsing from review result")
 
-        # ------------------------------------------------------------------ #
-        #  Feature-group driven scoring (NEW)
-        # ------------------------------------------------------------------ #
+        # Feature-group driven scoring
         group_rate, overall_rate = parse_group_pass_rates(eval_text)
-
-        # Fallback to legacy parsing
         sprint_rate, contract_rate = parse_pass_rates(eval_text)
         if group_rate is not None:
             contract_rate = group_rate
         if overall_rate is not None:
-            # Use overall_rate as the contract rate for back-compat
             pass
         elif contract_rate is None:
             contract_rate = 0.0
-        # FIX: Judge no longer outputs SPRINT_PASS_RATE; sprint_rate should reflect
-        # the current group's pass rate (same as contract_rate in feature-group mode).
         if sprint_rate is None:
             sprint_rate = contract_rate if contract_rate is not None else 0.0
 
@@ -702,7 +694,6 @@ class Harness:
         if contract_path.exists():
             contract_text = contract_path.read_text(encoding="utf-8", errors="replace")
             review_text = self.eval_cache.get_full_report(round_num) or ""
-            # In feature-group mode, only validate against current group's criteria
             group_id_for_validation = None
             if self.feature_groups and self.feature_groups.current_group:
                 group_id_for_validation = self.feature_groups.current_group_id
@@ -713,84 +704,53 @@ class Harness:
                 )
             )
             if total_contract > 0:
-                judge_reported_total = true_passed + true_failed + true_skipped
-                if abs(contract_rate - true_rate) > 0.05 or judge_reported_total < total_contract:
+                reviewer_reported_total = true_passed + true_failed + true_skipped
+                if abs(contract_rate - true_rate) > 0.05 or reviewer_reported_total < total_contract:
                     self.log.warning(
-                        f"[judge] Judge reported {contract_rate:.0%} ({judge_reported_total} criteria), "
+                        f"[reviewer] Reported {contract_rate:.0%} ({reviewer_reported_total} criteria), "
                         f"but true rate over {total_contract} criteria is {true_rate:.0%}. "
                         f"Using true rate."
                     )
                     contract_rate = true_rate
                 if overrides:
                     for ov in overrides:
-                        self.log.warning(f"[judge] {ov}")
+                        self.log.warning(f"[reviewer] {ov}")
         else:
-            self.log.warning("[judge] contract.md not found, cannot verify true denominator")
+            self.log.warning("[reviewer] contract.md not found, cannot verify true denominator")
 
         # Detect excessive SKIP ratio
         skip_rate = parse_skip_rate(eval_text)
         if skip_rate > 0.20 and contract_rate >= config.CONTRACT_PASS_RATE_THRESHOLD:
             adjusted_contract = contract_rate * (1 - skip_rate)
             self.log.warning(
-                f"[judge] Judge gave {contract_rate:.0%} contract but SKIP ratio is {skip_rate:.0%}. "
+                f"[reviewer] SKIP ratio is {skip_rate:.0%}. "
                 f"Adjusting contract rate to {adjusted_contract:.0%} to prevent premature termination."
             )
             contract_rate = adjusted_contract
 
         # Handle Reviewer incomplete/error status
-        # NOTE: Reviewer may be INCOMPLETE because browser automation cannot trigger
-        # React controlled components, file uploads, audio processing, etc. This is
-        # a browser limitation, NOT a code failure. Judge performs independent code
-        # review and should be trusted if it verifies implementation correctness.
         if reviewer_status == "incomplete":
-            # Check if Judge performed its own code review
-            judge_did_code_review = (
-                "read_file" in str(judge_result).lower()
-                or "source code" in str(judge_result).lower()
-                or "code review" in str(judge_result).lower()
-                or "implementation" in str(judge_result).lower()
-            )
-            if judge_did_code_review:
-                # Judge independently verified code — trust its score fully
-                # Browser automation limitations should NOT block code-correct features
-                self.log.info(
-                    f"[judge] Reviewer INCOMPLETE but Judge performed independent code review. "
-                    f"Trusting Judge's score: {contract_rate:.0%} / {sprint_rate:.0%}. "
-                    f"(Reviewer likely hit browser automation limits for React/file-upload features)"
-                )
-                # NO CAP applied — code correctness is the ground truth
-            else:
-                # Judge did not perform code review — soft cap as safety net
-                capped_contract = min(contract_rate, 0.85)
-                capped_sprint = min(sprint_rate, 0.85)
+            # Reviewer incomplete but may have produced partial feedback
+            # Trust the feedback if it exists, otherwise cap
+            if not feedback_path.exists():
+                capped_contract = min(contract_rate, 0.70)
+                capped_sprint = min(sprint_rate, 0.70)
                 if capped_contract < contract_rate or capped_sprint < sprint_rate:
                     self.log.warning(
-                        f"[judge] Reviewer INCOMPLETE and Judge did not perform code review. "
+                        f"[reviewer] INCOMPLETE and no feedback.md produced. "
                         f"Soft-capping to {capped_contract:.0%} / {capped_sprint:.0%}."
                     )
                 contract_rate = capped_contract
                 sprint_rate = capped_sprint
         elif reviewer_status == "error":
-            # Reviewer hit an actual error (not just iteration limit)
-            # Only force 0% if Judge didn't do any code review
-            judge_did_code_review = (
-                "read_file" in str(judge_result).lower()
-                or "source code" in str(judge_result).lower()
-                or "code review" in str(judge_result).lower()
-            )
-            if not judge_did_code_review:
-                if contract_rate > 0 or sprint_rate > 0:
-                    self.log.warning(
-                        f"[judge] Judge gave {contract_rate:.0%} contract / {sprint_rate:.0%} sprint, "
-                        f"but Reviewer FAILED and Judge did no code review. Forcing to 0%."
-                    )
-                contract_rate = 0.0
-                sprint_rate = 0.0
-            else:
-                self.log.info(
-                    f"[judge] Reviewer ERROR but Judge performed code review. "
-                    f"Trusting Judge's score: {contract_rate:.0%}."
+            # Reviewer hit an actual error
+            if contract_rate > 0 or sprint_rate > 0:
+                self.log.warning(
+                    f"[reviewer] Reviewer ERROR but contract_rate={contract_rate:.0%}. "
+                    f"Forcing to 0%."
                 )
+            contract_rate = 0.0
+            sprint_rate = 0.0
 
         # ------------------------------------------------------------------ #
         #  Update feature-group state (NEW)
@@ -827,8 +787,8 @@ class Harness:
         self.score_history.append(contract_rate)
         self.log.info(f"  Group pass rate: {contract_rate:.0%} | Overall: {self.feature_groups.overall_rate():.0%}" if self.feature_groups else f"  Sprint pass rate: {sprint_rate:.0%} | Contract pass rate: {contract_rate:.0%}")
 
-        round_prompt = build_usage["prompt"] + review_usage["prompt"] + judge_usage["prompt"]
-        round_completion = build_usage["completion"] + review_usage["completion"] + judge_usage["completion"]
+        round_prompt = build_usage["prompt"] + review_usage["prompt"]
+        round_completion = build_usage["completion"] + review_usage["completion"]
         self.token_totals["prompt"] += round_prompt
         self.token_totals["completion"] += round_completion
         elapsed = time.time() - round_start
@@ -1262,3 +1222,201 @@ class Harness:
                 return 1
 
         return 0
+
+    # ------------------------------------------------------------------ #
+    #      Final Review Phase                                           #
+    # ------------------------------------------------------------------ #
+    def _run_final_review(self, round_num: int) -> dict:
+        """Run a comprehensive final review of ALL criteria after tier1+tier2 pass.
+        
+        This catches regressions, bugs, and missed D/T standards that were
+        skipped during the per-group build-eval loop.
+        
+        Returns:
+            dict with keys:
+                - issues_found: int (number of regressions found)
+                - dt_failures: int (number of D/T criteria failures)
+                - final_contract_rate: float
+                - final_overall_rate: float
+                - review_report_path: Path to saved review report
+        """
+        self.log.info("\n" + "="*60)
+        self.log.info("FINAL REVIEW PHASE")
+        self.log.info("="*60)
+        
+        contract_ref = config.CONTRACT_FILE
+        
+        # Step 1: Reviewer — comprehensive review of ALL groups
+        self.log.info("Final Review — Step 1: Reviewer (full contract review)")
+        self.dashboard.start_agent("Reviewer")
+        
+        # Build a comprehensive review task covering ALL functional groups
+        all_groups_text = ""
+        if self.feature_groups:
+            for g in self.feature_groups.groups:
+                gid = g["id"]
+                rate = self.feature_groups.pass_rates.get(gid, 0.0)
+                all_groups_text += f"- {gid} {g['name']}: previously scored {rate:.0%}\n"
+        
+        review_task = (
+            f"FINAL REVIEW — Round {round_num}.\n\n"
+            f"This is a COMPREHENSIVE review of the ENTIRE project after all functional "
+            f"groups have been implemented. Your job is to find REGRESSIONS, BUGS, and "
+            f"issues that were missed during per-group development.\n\n"
+            f"Previously implemented groups:\n{all_groups_text}\n"
+            f"Read {contract_ref}, then:\n"
+            f"1. Test ALL major features — not just the current group.\n"
+            f"2. Look for: broken interactions, missing elements, console errors, "
+            f"   visual glitches, responsive issues, accessibility problems.\n"
+            f"3. Check D/T (Design/Technical) criteria that were skipped earlier.\n"
+            f"4. Report ONLY real bugs and regressions — do not re-test passing features.\n"
+            f"Limit: 30 iterations max."
+        )
+        
+        review_result, review_usage = self.reviewer.run_with_stats(review_task, max_iterations=30)
+        
+        # Save final review report
+        final_review_path = self.workspace / ".eval_cache" / f"round_{round_num}_final_review.md"
+        try:
+            final_review_path.write_text(review_result, encoding="utf-8")
+        except Exception:
+            pass
+        
+        reviewer_status = "success"
+        if "[REVIEWER STATUS: INCOMPLETE" in review_result:
+            reviewer_status = "incomplete"
+        elif review_result.startswith("[error]"):
+            reviewer_status = "error"
+            self.log.warning("[final_review] Reviewer error — continuing with code review only")
+        
+        self.dashboard.end_agent(reviewer_status)
+        
+        # Parse final review results from feedback.md (generated by Reviewer)
+        feedback_path = self.workspace / config.FEEDBACK_FILE
+        eval_text = ""
+        if feedback_path.exists():
+            try:
+                eval_text = feedback_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                eval_text = review_result
+        else:
+            eval_text = review_result
+        
+        # Extract metrics from Reviewer output
+        issues_found = 0
+        dt_failures = 0
+        final_contract_rate = 0.0
+        
+        import re as _re
+        m = _re.search(r"FINAL_PASS_RATE[:：]\s*(\d+)%", eval_text)
+        if m:
+            final_contract_rate = int(m.group(1)) / 100.0
+        else:
+            _, final_contract_rate = parse_pass_rates(eval_text)
+            if final_contract_rate is None:
+                final_contract_rate = 0.0
+        
+        m = _re.search(r"REGRESSIONS?[:：]\s*(\d+)", eval_text)
+        if m:
+            issues_found = int(m.group(1))
+        else:
+            issues_found = eval_text.lower().count("regression")
+        
+        m = _re.search(r"DT_PASS_RATE[:：]\s*(\d+)%", eval_text)
+        if m:
+            dt_rate = int(m.group(1)) / 100.0
+            dt_failures = max(0, int((1.0 - dt_rate) * 10))
+        
+        m = _re.search(r"BUGS_FOUND[:：]\s*(\d+)", eval_text)
+        if m:
+            issues_found = max(issues_found, int(m.group(1)))
+        
+        self.log.info(
+            f"[final_review] Complete: {issues_found} issues, "
+            f"{dt_failures} D/T failures, {final_contract_rate:.0%} final rate"
+        )
+        
+        return {
+            "issues_found": issues_found,
+            "dt_failures": dt_failures,
+            "final_contract_rate": final_contract_rate,
+            "final_overall_rate": final_contract_rate,
+            "review_report_path": str(final_review_path),
+        }
+
+    def _run_final_fix_round(self, round_num: int, final_review: dict) -> dict:
+        """Run one final Builder round to fix issues found in final review.
+        
+        Args:
+            round_num: The round number that triggered final review
+            final_review: Result dict from _run_final_review()
+            
+        Returns:
+            dict with updated score metrics after fix round
+        """
+        self.log.info("\n" + "="*60)
+        self.log.info("FINAL FIX ROUND")
+        self.log.info("="*60)
+        
+        # Write a special sprint.md for the fix round
+        fix_sprint_path = self.workspace / config.SPRINT_FILE
+        fix_sprint_content = (
+            f"# Final Fix Round\n\n"
+            f"## Goal\n"
+            f"Fix critical issues found in the final review.\n\n"
+            f"## Issues to Fix\n"
+            f"- Regressions found: {final_review.get('issues_found', 0)}\n"
+            f"- D/T failures: {final_review.get('dt_failures', 0)}\n"
+            f"- Final pass rate before fix: {final_review.get('final_contract_rate', 0):.0%}\n\n"
+            f"## Instructions\n"
+            f"1. Read feedback.md for the final review findings.\n"
+            f"2. Focus on CRITICAL and MAJOR bugs first.\n"
+            f"3. Fix regressions in previously-passing functional groups.\n"
+            f"4. Address D/T (Design/Technical) criteria if feasible.\n"
+            f"5. Do NOT refactor or rewrite — only fix specific issues.\n"
+            f"6. Validate build passes after each change.\n"
+        )
+        try:
+            fix_sprint_path.write_text(fix_sprint_content, encoding="utf-8")
+        except Exception:
+            pass
+        
+        # Build fix task for Builder
+        rollback_msg = (
+            f"\n\nFINAL FIX ROUND: The project passed all functional tiers, but "
+            f"the final review found {final_review.get('issues_found', 0)} issues. "
+            f"Read feedback.md for specific bugs to fix. Focus on critical issues only."
+        )
+        
+        build_task = self._build_build_task(round_num, rollback_msg)
+        
+        # Run Builder
+        self.log.info(f"[Builder] Agent starting (final fix)")
+        self.dashboard.start_agent("Builder")
+        build_result, build_usage = self.builder.run_with_stats(build_task)
+        self.dashboard.end_agent("success")
+        
+        # Parse Builder strategy
+        strategy = self._parse_strategy(build_result)
+        self.strategy_history.append({"round": round_num, **strategy})
+        
+        # Pipeline: Build validation
+        self.log.info("[pipeline] Phase 2 — Validation & commit (final fix)")
+        runner = PipelineRunner(self.workspace, self.event_bus)
+        runner.add_stage(BuildGateStage)
+        runner.add_stage(DevServerGateStage)
+        runner.add_stage(ScreenshotGateStage)
+        runner.add_stage(GitCommitStage)
+        context = runner.run(round_num)
+        
+        build_result_gate = context.get("build_gate")
+        if build_result_gate and not build_result_gate.success:
+            self.log.warning("[final_fix] Build failed — returning original scores")
+            return {
+                "score": final_review.get("final_contract_rate", 0.0),
+                "contract_rate": final_review.get("final_contract_rate", 0.0),
+                "sprint_rate": final_review.get("final_contract_rate", 0.0),
+            }
+        
+        # Re-run evaluation to get updated scores
+        return self._run_evaluation(round_num, time.time(), build_usage, strategy)

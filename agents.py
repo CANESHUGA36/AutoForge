@@ -221,6 +221,23 @@ class Agent:
                 name = tool_call.function.name
                 arguments = json.loads(tool_call.function.arguments)
 
+                # FIX: Enforce allowed_tools — reject calls to tools not in the agent's toolset.
+                # LLMs may hallucinate tool calls even when the tool is not in the provided schemas.
+                allowed = {t["function"]["name"] for t in self.tools}
+                if name not in allowed:
+                    result = f"[error] Tool '{name}' is not available to {self.name}. Available tools: {', '.join(sorted(allowed))}"
+                    self._log.warning(f"[{self.name}] Rejected unauthorized tool call: {name}")
+                    tool_start = time.time()
+                    tool_latency = time.time() - tool_start
+                    tool_latency_ms = round(tool_latency * 1000)
+                    # Still append to messages so LLM learns from the error
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result
+                    })
+                    continue
+
                 tool_start = time.time()
                 result = execute_tool(name, arguments)
                 if result is None:
@@ -232,6 +249,16 @@ class Agent:
                 if self.use_state and self._workspace_state is not None:
                     self._workspace_state.update_from_tool_result(name, arguments, result)
                     self._workspace_state.save(config.WORKSPACE)
+
+                # FIX: Auto-restart dev server after Builder writes/edits files.
+                # Vite's HMR can fail to pick up changes in Docker/container environments,
+                # causing Reviewer to see stale code. Force restart ensures latest code is served.
+                if self.name == "Builder" and name in ("write_file", "edit_file"):
+                    try:
+                        from tools_impl import _restart_dev_server_if_running
+                        _restart_dev_server_if_running()
+                    except Exception as e:
+                        log.debug(f"[Builder] Dev server auto-restart skipped: {e}")
 
                 # 结果摘要
                 result_preview = result[:300].replace("\n", " ")

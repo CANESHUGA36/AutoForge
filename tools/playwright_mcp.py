@@ -171,14 +171,24 @@ class BrowserSession:
         if self._initialized:
             return
 
+        # FIX: Use system-installed chromium instead of letting MCP download
+        # its own chrome-for-testing (which fails in network-restricted environments).
+        chromium_path = "/root/.cache/ms-playwright/chromium-1219/chrome-linux64/chrome"
+        args = [
+            "--yes", "@playwright/mcp@latest",
+            "--headless",
+            "--browser", "chromium",
+            "--console-level", "error",
+        ]
+        if Path(chromium_path).exists():
+            args.extend(["--executable-path", chromium_path])
+            log.info(f"[BrowserSession] Using system chromium: {chromium_path}")
+        else:
+            log.warning(f"[BrowserSession] System chromium not found at {chromium_path}, MCP will attempt to download")
+
         params = StdioServerParameters(
             command="npx",
-            args=[
-                "--yes", "@playwright/mcp@latest",
-                "--headless",
-                "--browser", "chromium",
-                "--console-level", "error",
-            ],
+            args=args,
         )
 
         self._client_ctx = stdio_client(params)
@@ -280,30 +290,14 @@ class BrowserSession:
         # 如果是 fresh 模式，执行硬刷新确保拿到最新代码
         # Vite dev server 的内存缓存可能导致旧代码被 serve，即使磁盘文件已更新
         if fresh:
-            # 1. 执行 location.reload(true) 强制从服务器重新加载（绕过浏览器缓存）
-            await self._call_tool("browser_evaluate", {
-                "function": """() => {
-                    // 硬刷新：强制从服务器重新加载，绕过所有缓存
-                    window.location.reload(true);
-                    return 'hard_reload_triggered';
-                }"""
-            })
-            # 等待页面重新加载完成
-            await asyncio.sleep(wait + 1)
-            
-            # 2. 验证页面确实重新加载了（检查新的时间戳）
-            load_time_result = await self._call_tool("browser_evaluate", {
-                "function": "() => document.readyState"
-            })
-            load_state = self._extract_eval_result(load_time_result)
-            if load_state != 'complete':
-                await asyncio.sleep(2)
-            
-            # 3. 再次获取标题确认
-            title2 = await self._call_tool("browser_evaluate", {
-                "function": "() => document.title"
-            })
-            title = self._extract_eval_result(title2) or title
+            # CRITICAL FIX: window.location.reload(true) only bypasses HTTP cache,
+            # but does NOT clear the browser's compiled JavaScript module cache.
+            # Vite's HMR keeps compiled modules in memory, so stale code persists.
+            # We must close and recreate the entire browser session to get a truly clean state.
+            log.info("[BrowserSession] Fresh mode: closing session for complete cache reset")
+            await self.close()
+            # SessionPool will auto-recreate on next get_session() call
+            raise RuntimeError("SESSION_RESTART_REQUIRED")
 
         return {"url": original_url, "title": title}
 
@@ -609,8 +603,19 @@ async def _browser_check_async(
             log.info(f"[browser_check] Fresh mode: caches cleared, wait={wait}s")
 
         # ── Step 2: 导航 ──
-        nav_info = await session.navigate(url, fresh=fresh, wait=wait)
-        result.update(nav_info)
+        try:
+            nav_info = await session.navigate(url, fresh=fresh, wait=wait)
+            result.update(nav_info)
+        except RuntimeError as e:
+            if "SESSION_RESTART_REQUIRED" in str(e):
+                # Session was closed by navigate(fresh=True) for complete cache reset.
+                # Get a brand new session from the pool and navigate again.
+                log.info("[browser_check] Session restarted for fresh mode, re-navigating...")
+                session = await pool.get_session(viewport)
+                nav_info = await session.navigate(url, fresh=False, wait=wait)
+                result.update(nav_info)
+            else:
+                raise
 
         # ── Step 3: 根据模式执行 ──
         if mode == "inspect":

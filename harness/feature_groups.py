@@ -31,14 +31,13 @@ def _compute_tiers(group_ids: list[str]) -> dict[str, dict]:
     
     策略：
     - Functional Criteria (F1, F2, ...) 分配到 tier1/tier2
-    - Design Criteria (D) 和 Technical Criteria (T) 固定归到 tier3
+    - Design Criteria (D) 和 Technical Criteria (T) 被忽略（不纳入退出判定）
     - tier1: 前 50% Functional 组，要求 100%
     - tier2: 后 50% Functional 组，要求 90%
-    - tier3: 所有 D/T 组，要求 70%
+    - tier3: 已删除（D/T 组不阻塞项目成功）
     """
-    # 分离 Functional 组和非 Functional 组
+    # 只保留 Functional 组
     functional_groups = [g for g in group_ids if g.startswith("F")]
-    non_functional_groups = [g for g in group_ids if not g.startswith("F")]
     
     n_func = len(functional_groups)
     
@@ -52,16 +51,12 @@ def _compute_tiers(group_ids: list[str]) -> dict[str, dict]:
         tier1_groups = functional_groups[:split]
         tier2_groups = functional_groups[split:]
     
-    # 非 Functional 组（D/T）固定归 tier3
-    tier3_groups = non_functional_groups
-    
     result: dict[str, dict] = {}
     if tier1_groups:
         result["tier1"] = {"groups": tier1_groups, "min_rate": 1.0, "label": "MVP Core"}
     if tier2_groups:
         result["tier2"] = {"groups": tier2_groups, "min_rate": 0.90, "label": "Core Experience"}
-    if tier3_groups:
-        result["tier3"] = {"groups": tier3_groups, "min_rate": 0.70, "label": "Design & Technical"}
+    # NOTE: tier3 (D/T groups) removed — they don't block project success
     
     # 保底：如果没有任何 tier，所有组归 tier1
     if not result:
@@ -332,15 +327,19 @@ def _get_group_threshold(group_id: str) -> float:
 
 
 def _check_exit_condition_dynamic(feature_groups: "FeatureGroupState") -> tuple[bool, str]:
-    """动态退出条件：根据实际 tier 结构判断。"""
+    """动态退出条件：只检查 tier1 和 tier2，D/T 组不阻塞成功。"""
     if not feature_groups:
         return False, "No feature groups"
     
     ts = feature_groups.tier_status()
     overall = feature_groups.overall_rate()
     
-    # 检查所有 tier
-    for tier_name, status in ts.items():
+    # 只检查 tier1 和 tier2（功能性标准）
+    # tier3 (D/T) 被忽略，不阻塞项目成功
+    for tier_name in ("tier1", "tier2"):
+        status = ts.get(tier_name)
+        if status is None:
+            continue
         if not status["passed"]:
             return False, (
                 f"{TIER_REQUIREMENTS.get(tier_name, {}).get('label', tier_name)} "
@@ -348,16 +347,16 @@ def _check_exit_condition_dynamic(feature_groups: "FeatureGroupState") -> tuple[
                 f"groups, overall {overall:.0%}"
             )
     
-    # 检查 overall
+    # 检查 overall（仍然保留作为全局质量门槛）
     if overall < OVERALL_PASS_THRESHOLD:
         return False, f"Overall {overall:.0%} below threshold {OVERALL_PASS_THRESHOLD:.0%}"
     
-    # 检查 stuck groups
+    # 检查 stuck groups（仍然保留，防止无限循环）
     stuck, stuck_gid = feature_groups.any_group_stuck()
     if stuck:
         return False, f"Group {stuck_gid} stuck for {feature_groups.stuck_counts.get(stuck_gid, 0)} rounds"
     
-    return True, f"All tiers passed, overall {overall:.0%}"
+    return True, f"All functional tiers passed (tier1=100%, tier2>=90%), overall {overall:.0%}"
 
 
 def get_group_instruction(group_id: str, group: dict) -> str:

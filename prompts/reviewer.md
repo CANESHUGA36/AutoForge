@@ -82,37 +82,68 @@ read_skill_file("browser-testing")
 
 ## 统一输出格式（关键：区分代码审查和浏览器测试）
 
+你的报告必须包含两部分：
+1. **Review Report**（详细审查过程）—— 保存到 `.eval_cache/round_{round_num}_review.md`
+2. **Feedback**（给 Builder 的修复指导）—— 保存到 `feedback.md`
+
+### Part 1: Review Report（详细过程）
+
 ```markdown
 # Review Report — Round {round_num} — {group_id}
 
 ## 功能组: {group_id} {group_name}
 
-### Code Review Findings（主要判定依据）
-- [x] {group_id}.1: JSX 存在，handler 非空 → **CODE PASS**
-- [x] {group_id}.2: 事件绑定正确，state 逻辑完整 → **CODE PASS**
-- [ ] {group_id}.3: JSX 缺失 / handler 为空 → **CODE FAIL**
+### Code Review Findings
+- [x] {group_id}.1: JSX 存在，handler 非空 → CODE PASS
+- [ ] {group_id}.3: JSX 缺失 / handler 为空 → CODE FAIL
 
-### Browser Test Results（补充验证）
+### Browser Test Results
 - {group_id}.1: 按钮点击正常 → Browser PASS
-- {group_id}.2: React 输入无法程序化触发 → **Browser SKIP（代码已验证）**
+- {group_id}.2: React 输入无法程序化触发 → Browser SKIP（代码已验证）
 
-### Browser Test Limitations（不影响评分）
+### Browser Test Limitations
 - {group_id}.2: React controlled input 无法通过 dispatchEvent 触发
-  → 已通过代码审查验证 handler 存在且非空
-- {group_id}.4: 文件上传需要真实用户交互
-  → 已通过代码审查验证 onChange 处理逻辑完整
-
-## Overall Assessment
-- Build status: PASS/FAIL
-- Code Review Coverage: X/Y criteria verified
-- Browser Test Coverage: X/Y criteria tested (Z skipped due to automation limits)
-- 当前功能组 Ready for scoring: YES/NO
 ```
 
-**关键规则：**
-- **CODE PASS/CODE FAIL** 是主要判定，基于源码分析
-- **Browser SKIP** 表示浏览器无法测试但代码已验证，**不应判为 FAIL**
-- Judge 会优先采用 Code Review 结论，Browser SKIP 不会导致评分降低
+### Part 2: Feedback（给 Builder）
+
+**使用 `write_file` 保存到 `{{WORKSPACE}}/feedback.md`：**
+
+```markdown
+# QA Feedback — Round {round_num}
+
+## 功能组评估: {group_id} — {group_name}
+
+**GROUP_PASS_RATE: XX% (X/Y criteria)**
+
+### Passed
+- [x] **{group_id}.1**: 具体描述 — ✅ PASS — 判定理由
+- [x] **{group_id}.2**: 具体描述 — ✅ PASS — 判定理由
+
+### Failed（必须修复）
+- [ ] **{group_id}.3**: 具体描述 — ❌ FAIL — 失败原因 + 具体修复指导
+- [ ] **{group_id}.4**: 具体描述 — ❌ FAIL — 失败原因 + 具体修复指导
+
+## 全局进度
+**OVERALL_PASS_RATE: XX% (X/Y criteria)**
+
+### 已完成功能组
+- {group_id}: XX% (X/Y) ← 当前组
+
+## 本轮问题总结
+1. **问题1**: 具体描述
+2. **问题2**: 具体描述
+
+## Actionable Recommendations
+1. 修复 {group_id}.3: 具体指导
+2. 修复 {group_id}.4: 具体指导
+```
+
+**Feedback 写作规则：**
+- GROUP_PASS_RATE 必须真实反映 PASS/FAIL 数量
+- 每个 Failed 项必须给出**可执行的修复指导**（文件路径、代码位置、修复建议）
+- 不要只写"未实现"，要告诉 Builder 具体怎么改
+- 如果某项是 Browser SKIP（浏览器限制但代码正确），标记为 PASS 并注明原因
 
 ## Skill 参考
 
