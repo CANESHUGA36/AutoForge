@@ -62,7 +62,9 @@ const fiber = input.__reactFiber$...;
 | Form validation messages | ⚠️ Partial | Code review: check validation logic |
 | File upload via `<input type="file">` | ✅ Yes (see Part 3) | Use upload simulation |
 | Drag & drop file upload | ✅ Yes | Use DataTransfer simulation |
-| Button clicks | ✅ Yes | Use click action |
+| **React button onClick** | ❌ No | `element.click()` doesn't trigger React handlers |
+| **React state update (Zustand/Redux)** | ❌ No | Internal state not observable from DOM |
+| Native button clicks | ✅ Yes | Use click action |
 | Checkbox toggles | ✅ Yes | Use click action |
 | Select dropdown | ✅ Yes | Use click + click option |
 
@@ -339,8 +341,17 @@ read_file(path="src/App.tsx");
 ### ❌ Mistake 3: Spending >5 iterations on browser tests
 If browser tests aren't working after 2-3 attempts, **switch to code review**.
 
+### ❌ Mistake 4: Trying to trigger React button clicks via JavaScript
+Builder agents often waste 10+ iterations trying:
+```javascript
+document.querySelector('[data-testid="btn"]').click();
+document.querySelector('[data-testid="btn"]').dispatchEvent(new MouseEvent('click'));
+```
+**These NEVER work for React onClick handlers.** Stop after 1 attempt.
+
 ### ✅ Correct: Budget your iterations
 - Max 3 browser_check calls per review
+- Max 2 browser_check calls for Builder
 - If all fail → rely on code review
 - Document in report: "Browser automation limitation — verified via code review"
 

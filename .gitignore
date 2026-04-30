@@ -76,3 +76,15 @@ workspace/
 projects/
 *.bak
 *.orig
+
+# Playwright MCP logs
+.playwright-mcp/
+
+# Runtime logs
+container_logs.txt
+
+# Browser screenshots
+_screenshot_*.png
+
+# Test directories
+test-playwright-click/

@@ -60,13 +60,13 @@ class Harness:
         CORE_TOOLS = {"read_file", "write_file", "read_skill_file"}
         FILE_TOOLS = {"edit_file", "list_files"}
         EXEC_TOOLS = {"run_bash", "start_dev_server"}
-        BROWSER_TOOLS = {"browser_test", "browser_evaluate"}
+        BROWSER_TOOLS = {"browser_check"}
         GEN_TOOLS = {"generate_image", "search_web", "analyze_image"}
         META_TOOLS = {"validate_build", "project_init"}
 
         architect_tools = CORE_TOOLS | GEN_TOOLS | {"search_web"}
         sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
-        builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS
+        builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS | BROWSER_TOOLS
         reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"start_dev_server"}
         judge_tools = CORE_TOOLS | {"read_file", "write_file", "read_skill_file"}
 
@@ -317,14 +317,27 @@ class Harness:
             except Exception:
                 pass
 
-        # FIX: Force restart dev server BEFORE Builder starts, so Builder works
-        # with a fresh dev server that reliably picks up file changes.
-        # Previously dev server was restarted AFTER Builder, causing Builder's
-        # own browser_check calls to see stale cached code.
-        from tools_impl import _kill_dev_server
-        self.log.info("[dev_server] Stopping existing dev server before Builder...")
+        # FIX: Force restart dev server BEFORE Builder starts, so Builder's
+        # browser_check calls work correctly. Previously dev server was only
+        # available in Phase 2 (after Builder), causing Builder's browser_check
+        # to fail with "localhost" empty page.
+        from tools_impl import _kill_dev_server, start_dev_server
+        from harness.build import _detect_project_port
+        self.log.info("[dev_server] Restarting dev server before Builder...")
         _kill_dev_server()
         time.sleep(2)  # Wait for port release
+        
+        # Start fresh dev server for Builder to use
+        pkg = self.workspace / "package.json"
+        if pkg.exists():
+            port = _detect_project_port(self.workspace)
+            wait = max(getattr(config, 'DEV_SERVER_DEFAULT_WAIT', 8), 15)
+            result = start_dev_server("npm run dev", port=port, wait=wait)
+            if not result.startswith("[error]"):
+                self.log.info(f"[dev_server] Started on port {port}")
+            else:
+                self.log.warning(f"[dev_server] Failed to start: {result}")
+        time.sleep(1)
 
         # ===== Pipeline Phase 1: 环境预检（仅在需要时）=====
         if round_num == 1 or self._needs_env_check():

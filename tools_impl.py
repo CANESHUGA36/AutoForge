@@ -588,11 +588,11 @@ def generate_image(
 
     try:
 
-        api_key = (config.MINIMAX_API_KEY or "").strip()
+        api_key = (config.GENERATE_IMAGE_API_KEY or "").strip()
 
         if not api_key:
 
-            return "[error] MINIMAX_API_KEY not set (or OPENAI_API_KEY empty); add a key in .env"
+            return "[error] GENERATE_IMAGE_API_KEY not set (or OPENAI_API_KEY empty); add a key in .env"
 
         if not prompt or not prompt.strip():
 

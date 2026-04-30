@@ -30,29 +30,44 @@ def _compute_tiers(group_ids: list[str]) -> dict[str, dict]:
     """根据实际功能组数量动态计算 Tier 划分。
     
     策略：
-    - ≤ 5 个组：不分 tier，所有组都是 tier1（100% 通过）
-    - 6-10 个组：前 50% tier1（100%），后 50% tier2（80%）
-    - > 10 个组：前 40% tier1，中间 40% tier2，剩余 tier3（70%）
+    - Functional Criteria (F1, F2, ...) 分配到 tier1/tier2
+    - Design Criteria (D) 和 Technical Criteria (T) 固定归到 tier3
+    - tier1: 前 50% Functional 组，要求 100%
+    - tier2: 后 50% Functional 组，要求 90%
+    - tier3: 所有 D/T 组，要求 70%
     """
-    n = len(group_ids)
-    if n <= 5:
-        return {
-            "tier1": {"groups": group_ids, "min_rate": 1.0, "label": "All Features"},
-        }
-    elif n <= 10:
-        split = n // 2
-        return {
-            "tier1": {"groups": group_ids[:split], "min_rate": 1.0, "label": "MVP Core"},
-            "tier2": {"groups": group_ids[split:], "min_rate": 0.80, "label": "Core Experience"},
-        }
+    # 分离 Functional 组和非 Functional 组
+    functional_groups = [g for g in group_ids if g.startswith("F")]
+    non_functional_groups = [g for g in group_ids if not g.startswith("F")]
+    
+    n_func = len(functional_groups)
+    
+    # 划分 Functional 组到 tier1/tier2
+    if n_func <= 3:
+        # Functional 组很少，全部归 tier1
+        tier1_groups = functional_groups
+        tier2_groups = []
     else:
-        t1_end = max(2, int(n * 0.4))
-        t2_end = max(t1_end + 1, int(n * 0.8))
-        return {
-            "tier1": {"groups": group_ids[:t1_end], "min_rate": 1.0, "label": "MVP Core"},
-            "tier2": {"groups": group_ids[t1_end:t2_end], "min_rate": 0.80, "label": "Core Experience"},
-            "tier3": {"groups": group_ids[t2_end:], "min_rate": 0.70, "label": "Extended"},
-        }
+        split = n_func // 2
+        tier1_groups = functional_groups[:split]
+        tier2_groups = functional_groups[split:]
+    
+    # 非 Functional 组（D/T）固定归 tier3
+    tier3_groups = non_functional_groups
+    
+    result: dict[str, dict] = {}
+    if tier1_groups:
+        result["tier1"] = {"groups": tier1_groups, "min_rate": 1.0, "label": "MVP Core"}
+    if tier2_groups:
+        result["tier2"] = {"groups": tier2_groups, "min_rate": 0.90, "label": "Core Experience"}
+    if tier3_groups:
+        result["tier3"] = {"groups": tier3_groups, "min_rate": 0.70, "label": "Design & Technical"}
+    
+    # 保底：如果没有任何 tier，所有组归 tier1
+    if not result:
+        result["tier1"] = {"groups": group_ids, "min_rate": 1.0, "label": "All Features"}
+    
+    return result
 
 OVERALL_PASS_THRESHOLD = 0.75
 GROUP_PASS_THRESHOLD_DEFAULT = 0.70

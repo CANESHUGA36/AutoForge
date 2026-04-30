@@ -168,6 +168,34 @@ project_init(template="vite-react-ts")
 
 **你最多调用 2 次 browser_check。超过 2 次必须停止，直接提交。**
 
+#### ⚠️ React 事件触发限制（关键！不要浪费迭代）
+
+**React 的 onClick/onKeyDown 等事件处理器无法通过 JavaScript 的 `element.click()` 触发。**
+
+以下方法全部无效：
+```javascript
+// ❌ 全部无效 —— React 不会响应
+document.querySelector('[data-testid="btn"]').click();
+document.querySelector('[data-testid="btn"]').dispatchEvent(new MouseEvent('click'));
+```
+
+**这意味着**：
+- 你**无法**通过 browser_check 验证按钮点击后状态是否更新
+- 你**无法**通过 browser_check 验证输入框输入后是否触发搜索
+- 你**只能**验证：DOM 元素是否存在、是否正确渲染
+
+**正确用法**：
+```javascript
+// ✅ 验证 DOM 存在性（唯一可靠的验证方式）
+return {
+  hasButton: !!document.querySelector('[data-testid="f1-btn"]'),
+  buttonText: document.querySelector('[data-testid="f1-btn"]')?.textContent,
+  hasCanvas: !!document.querySelector('canvas'),
+};
+```
+
+**如果代码逻辑正确（事件处理器已绑定、state 更新逻辑正确）→ 直接提交，不要反复测试交互。**
+
 常见陷阱：
 - **Dev server 问题**：`run_bash` 启动的后台进程会在命令结束后被清理。不要尝试用 `&` 后台启动 dev server。
 - **如果 browser_check 找不到元素**：先确认 `validate_build()` 通过。构建通过 = 代码正确，直接提交。

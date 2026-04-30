@@ -224,3 +224,29 @@ npx tsc --noEmit  # Type check only, no emit
 # If build fails with module not found
 npm install  # Reinstall all dependencies
 ```
+
+## Builder-Specific Build Rules
+
+### Rule 1: validate_build() passing = code is correct
+If `validate_build()` returns `[BUILD OK]`, your code is correct. **Do not** doubt it because browser_check shows something unexpected.
+
+### Rule 2: CSS warnings are non-blocking
+```
+[CSS WARNING] Missing classes: bg-background, text-primary, border-primary. Check Tailwind/CSS config. (Non-blocking)
+```
+**Ignore these.** Tailwind v4 uses CSS variables, not traditional utility classes. These warnings are false positives.
+
+### Rule 3: Do NOT run npm install, npm ci, npm update
+These are handled by the framework. Running them wastes iterations and may break the environment.
+
+### Rule 4: Do NOT modify tsconfig to fix unused variable warnings
+Instead, set these in tsconfig:
+```json
+{
+  "compilerOptions": {
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  }
+}
+```
+This prevents build failures from refactoring artifacts while keeping real type safety.
