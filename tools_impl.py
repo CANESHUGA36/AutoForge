@@ -79,7 +79,13 @@ def read_file(path: str) -> str:
         # FIX: Increase limit for single-file projects (HTML/JS/CSS merged into one file)
         # Large single files are common in pure-HTML projects and must be read fully
         # to avoid code duplication and corruption during iterative editing.
-        limit = 80_000 if p.suffix in (".html", "htm") else 30_000
+        # Also increase for React/Vue components which can grow large with many features.
+        if p.suffix in (".html", ".htm"):
+            limit = 120_000
+        elif p.suffix in (".tsx", ".ts", ".jsx", ".js"):
+            limit = 80_000
+        else:
+            limit = 50_000
 
         if len(content) > limit:
 
@@ -1263,70 +1269,18 @@ def react_devtools_inspect(
 ) -> str:
     """Inspect React component tree using React DevTools protocol.
     
-    This bypasses DOM timing issues by checking the React Fiber tree directly.
-    Use this when browser_check fails to find dynamically rendered components.
+    DEPRECATED: This tool has event loop compatibility issues with the async Playwright MCP.
+    Use browser_check with mode='inspect' and a custom script instead.
+    
+    Example replacement:
+      browser_check(mode="inspect", script="return document.querySelector('[data-testid=\\'my-component\\']') !== null")
     """
-    try:
-        import asyncio
-        from harness.react_devtools import ReactDevToolsInspector
-        
-        # 获取当前 Playwright session（BrowserSession 对象）
-        from tools.playwright_mcp import _get_page
-        session = asyncio.get_event_loop().run_until_complete(_get_page())
-        
-        try:
-            inspector = ReactDevToolsInspector(session)
-            
-            # 检查组件存在
-            exists, count = asyncio.get_event_loop().run_until_complete(
-                inspector.check_component_exists(component_name)
-            )
-            
-            if not exists:
-                # 列出所有组件帮助调试
-                all_components = asyncio.get_event_loop().run_until_complete(
-                    inspector.list_all_components()
-                )
-                names = list(dict.fromkeys([c["name"] for c in all_components[:30]]))
-                return json.dumps({
-                    "component": component_name,
-                    "found": False,
-                    "similar_components": [n for n in names if component_name.lower() in n.lower() or n.lower() in component_name.lower()][:5],
-                    "all_components": names[:15],
-                }, indent=2, ensure_ascii=False)
-            
-            result = {
-                "component": component_name,
-                "found": True,
-                "count": count,
-            }
-            
-            # 检查 props
-            if check_props:
-                props = asyncio.get_event_loop().run_until_complete(
-                    inspector.get_component_props(component_name)
-                )
-                if props:
-                    props_match = all(
-                        props.get(k) == v or str(props.get(k)) == str(v)
-                        for k, v in check_props.items()
-                    )
-                    result["props_match"] = props_match
-                    result["actual_props"] = props
-                else:
-                    result["props_match"] = False
-                    result["actual_props"] = None
-            
-            return json.dumps(result, indent=2, ensure_ascii=False)
-        finally:
-            # FIX: Always close session to prevent Chrome process accumulation
-            try:
-                asyncio.get_event_loop().run_until_complete(session.close())
-            except Exception:
-                pass
-        
-    except Exception as e:
-        return f"[error] React DevTools inspection failed: {e}"
+    return (
+        "[note] react_devtools_inspect is deprecated due to event loop conflicts with Playwright MCP.\n"
+        "Please use browser_check with mode='inspect' and a custom script instead.\n"
+        f"To check for '{component_name}', use:\n"
+        "  browser_check(mode='inspect', script=\"return document.querySelector('[data-testid=\\\"...\\\"]') !== null\")"
+    )
 
 
 def contract_test_run(feature_group: str) -> str:
@@ -1423,6 +1377,245 @@ def browser_test(
         viewport=viewport,
         wait=startup_wait,
     )
+
+
+def check_console_logs(
+    url: str = "http://localhost:5173",
+    level: str = "error",
+    filter_keyword: str | None = None,
+    fresh: bool = False,
+    wait: int = 3,
+) -> str:
+    """获取浏览器控制台日志，用于检测 React 错误、网络失败、JS 异常等。
+    
+    Args:
+        url: 目标 URL
+        level: 日志级别 - "error"(默认), "warning", "all"
+        filter_keyword: 可选过滤关键词（如 "Maximum update depth"）
+        fresh: 是否强制刷新页面
+        wait: 页面加载后等待秒数
+    
+    Returns:
+        JSON 格式的日志列表
+    """
+    try:
+        import asyncio
+        from tools.playwright_mcp import _browser_check_async
+        
+        async def _get_logs():
+            result = await _browser_check_async(
+                url=url,
+                mode="inspect",
+                fresh=fresh,
+                wait=wait,
+                script="return 'ok'",  # 简单脚本确保页面加载
+            )
+            if isinstance(result, dict):
+                return result.get("console_errors", [])
+            return []
+        
+        # 运行异步函数
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: asyncio.run(_get_logs()))
+                logs = future.result(timeout=60)
+        except RuntimeError:
+            logs = asyncio.run(_get_logs())
+        
+        # 过滤日志
+        filtered = logs
+        if level == "error":
+            filtered = [log for log in logs if any(kw in log.lower() for kw in ["error", "exception", "failed"])]
+        elif level == "warning":
+            filtered = [log for log in logs if any(kw in log.lower() for kw in ["error", "exception", "failed", "warning", "warn"])]
+        
+        if filter_keyword:
+            filtered = [log for log in filtered if filter_keyword.lower() in log.lower()]
+        
+        # 分类统计
+        errors = [log for log in filtered if "error" in log.lower() or "exception" in log.lower()]
+        warnings = [log for log in filtered if "warn" in log.lower() and log not in errors]
+        
+        return json.dumps({
+            "total_logs": len(logs),
+            "filtered_count": len(filtered),
+            "errors": errors[:10],  # 最多返回 10 条
+            "warnings": warnings[:5],
+            "has_critical_errors": len(errors) > 0,
+            "sample": filtered[:3] if filtered else [],
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Failed to get console logs: {e}"
+
+
+def detect_framework(workspace: str = ".") -> str:
+    """自动检测项目使用的框架和技术栈。
+    
+    Args:
+        workspace: 项目目录路径（默认当前目录）
+    
+    Returns:
+        JSON 格式的检测结果
+    """
+    try:
+        ws = Path(workspace).resolve()
+        if not ws.exists():
+            ws = Path(config.WORKSPACE).resolve()
+        
+        result = {
+            "framework": "unknown",
+            "has_package_json": False,
+            "has_react": False,
+            "has_vue": False,
+            "has_nextjs": False,
+            "has_vite": False,
+            "test_url": "http://localhost:5173",
+            "build_command": None,
+            "dev_command": None,
+        }
+        
+        # 检查 package.json
+        pkg_json = ws / "package.json"
+        if pkg_json.exists():
+            result["has_package_json"] = True
+            try:
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                scripts = pkg.get("scripts", {})
+                
+                # 检测框架
+                if "next" in deps:
+                    result["framework"] = "nextjs"
+                    result["has_nextjs"] = True
+                    result["test_url"] = "http://localhost:3000"
+                    result["build_command"] = "next build"
+                    result["dev_command"] = "npm run dev"
+                elif "react" in deps or "react-dom" in deps:
+                    result["has_react"] = True
+                    if "vite" in deps or "@vitejs/plugin-react" in deps:
+                        result["framework"] = "vite-react"
+                        result["has_vite"] = True
+                        result["test_url"] = "http://localhost:5173"
+                        result["build_command"] = "npm run build"
+                        result["dev_command"] = "npm run dev"
+                    else:
+                        result["framework"] = "react"
+                        result["build_command"] = "npm run build"
+                elif "vue" in deps:
+                    result["has_vue"] = True
+                    if "vite" in deps or "@vitejs/plugin-vue" in deps:
+                        result["framework"] = "vite-vue"
+                        result["has_vite"] = True
+                        result["test_url"] = "http://localhost:5173"
+                    else:
+                        result["framework"] = "vue"
+                    result["build_command"] = "npm run build"
+                    result["dev_command"] = "npm run dev"
+                elif "vite" in deps:
+                    result["framework"] = "vite"
+                    result["has_vite"] = True
+                    result["test_url"] = "http://localhost:5173"
+                    result["dev_command"] = "npm run dev"
+                
+                # 从 scripts 中提取命令
+                if not result["dev_command"] and "dev" in scripts:
+                    result["dev_command"] = scripts["dev"]
+                if not result["build_command"] and "build" in scripts:
+                    result["build_command"] = scripts["build"]
+                    
+            except Exception:
+                pass
+        
+        # 检查源码中的框架线索
+        if result["framework"] == "unknown":
+            for src_file in ws.rglob("*.tsx"):
+                if src_file.stat().st_size < 100000:
+                    content = src_file.read_text(encoding="utf-8", errors="replace")
+                    if "from 'react'" in content or 'from "react"' in content:
+                        result["has_react"] = True
+                        result["framework"] = "react"
+                        break
+            
+            for src_file in ws.rglob("*.vue"):
+                result["has_vue"] = True
+                result["framework"] = "vue"
+                break
+        
+        # 纯 HTML 项目
+        if result["framework"] == "unknown":
+            index_html = ws / "index.html"
+            if index_html.exists() and not pkg_json.exists():
+                result["framework"] = "pure-html"
+                result["test_url"] = f"file://{index_html}"
+        
+        return json.dumps(result, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Framework detection failed: {e}"
+
+
+def run_diagnostics(command: str = "build", workspace: str = ".") -> str:
+    """运行安全的诊断命令（只读/构建检查，不修改文件）。
+    
+    Args:
+        command: 诊断类型 - "build", "lint", "type-check"
+        workspace: 项目目录路径
+    
+    Returns:
+        诊断结果
+    """
+    try:
+        ws = Path(workspace).resolve()
+        if not ws.exists():
+            ws = Path(config.WORKSPACE).resolve()
+        
+        # 白名单检查
+        allowed_commands = {
+            "build": "npm run build",
+            "lint": "npm run lint",
+            "type-check": "npx tsc --noEmit",
+            "typecheck": "npx tsc --noEmit",
+        }
+        
+        if command not in allowed_commands:
+            return f"[error] Unknown diagnostic command: {command}. Allowed: {list(allowed_commands.keys())}"
+        
+        cmd = allowed_commands[command]
+        
+        # 运行命令
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        
+        output = result.stdout + "\n" + result.stderr
+        
+        # 截断长输出
+        if len(output) > 5000:
+            output = output[:2500] + "\n... (truncated) ...\n" + output[-2500:]
+        
+        return json.dumps({
+            "command": cmd,
+            "exit_code": result.returncode,
+            "success": result.returncode == 0,
+            "output": output.strip(),
+        }, indent=2, ensure_ascii=False)
+        
+    except subprocess.TimeoutExpired:
+        return json.dumps({
+            "command": command,
+            "success": False,
+            "error": "Command timed out after 300s",
+        }, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"[error] Diagnostic failed: {e}"
 
 
 TOOL_SCHEMAS = [
@@ -1779,6 +1972,93 @@ BROWSER_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_console_logs",
+            "description": (
+                "Get browser console logs (errors, warnings). Use to detect React errors, "
+                "network failures, JS exceptions, infinite loops. Run this BEFORE detailed testing "
+                "to catch critical issues early."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Target URL. Default: http://localhost:5173",
+                        "default": "http://localhost:5173",
+                    },
+                    "level": {
+                        "type": "string",
+                        "description": "Log level filter: 'error' (default), 'warning', 'all'",
+                        "enum": ["error", "warning", "all"],
+                        "default": "error",
+                    },
+                    "filter_keyword": {
+                        "type": "string",
+                        "description": "Optional filter keyword (e.g., 'Maximum update depth')",
+                    },
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "Force refresh page before checking logs",
+                        "default": False,
+                    },
+                    "wait": {
+                        "type": "integer",
+                        "description": "Seconds to wait after navigation",
+                        "default": 3,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_framework",
+            "description": (
+                "Auto-detect project framework and tech stack. Use at the start of review "
+                "to determine appropriate testing strategy (React/Vue/Next.js/HTML)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "description": "Project directory path. Default: current workspace",
+                        "default": ".",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_diagnostics",
+            "description": (
+                "Run safe diagnostic commands (read-only/build check). Use to verify "
+                "build success, type checking, or linting. Does NOT modify files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Diagnostic type: 'build', 'lint', 'type-check'",
+                        "enum": ["build", "lint", "type-check"],
+                        "default": "build",
+                    },
+                    "workspace": {
+                        "type": "string",
+                        "description": "Project directory path",
+                        "default": ".",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 TOOL_DISPATCH = {
@@ -1797,6 +2077,9 @@ TOOL_DISPATCH = {
     "project_init": project_init,
     "contract_test_run": contract_test_run,
     "react_devtools_inspect": react_devtools_inspect,
+    "check_console_logs": check_console_logs,
+    "detect_framework": detect_framework,
+    "run_diagnostics": run_diagnostics,
 }
 
 

@@ -148,13 +148,14 @@ def parse_dimension_scores(text: str) -> dict:
 
 
 def check_dimension_thresholds(dim_scores: dict) -> list[str]:
-    """Return list of failure strings for dimensions below hard thresholds."""
-    failed = []
-    for dim, threshold in config.DIMENSION_THRESHOLDS.items():
-        score = dim_scores.get(dim)
-        if score is not None and score < threshold:
-            failed.append(f"{dim}={score:.1f} (threshold {threshold:.1f})")
-    return failed
+    """Return list of failure strings for dimensions below hard thresholds.
+    
+    Note: In big-group mode, dimension thresholds are deprecated.
+    This function is kept for backward compatibility and always returns [].
+    """
+    # Big-group mode: dimension thresholds no longer used
+    # Reviewer makes autonomous pass/fail decisions
+    return []
 
 
 # --------------------------------------------------------------------------- #

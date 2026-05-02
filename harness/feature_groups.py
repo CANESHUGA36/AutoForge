@@ -1,8 +1,8 @@
 """
-功能组（Feature Group）管理 — 按 contract.md 中的功能编号拆分阶段
+功能组（Feature Group）管理 — 按 contract.md 中的大组（Group）拆分阶段
 
-将 contract 的 142+ 项标准按 F1/F2/.../F17 + D + T 拆分为功能组，
-每轮 Sprint 只推进一个功能组，Reviewer 只验证当前组。
+将 contract 的标准按大组（Group 1, Group 2, ...）拆分，
+每个大组包含多个子功能，每轮 Sprint 只推进一个大组。
 """
 from __future__ import annotations
 
@@ -14,177 +14,179 @@ log = logging.getLogger("harness")
 # --------------------------------------------------------------------------- #
 #  Tier 定义
 # --------------------------------------------------------------------------- #
-# Tier groups are dynamically computed based on actual parsed groups
-# to support variable project sizes (small: 3-5 groups, medium: 8-12, large: 15+)
+# 大组模式下，tier 概念简化：
+# - 所有大组都是功能性的，没有单独的 D/T 组
+# - 通过阈值统一使用 GROUP_PASS_THRESHOLD
 
-TIER_REQUIREMENTS: dict[str, dict] = {}
-
-# 从 config 读取阈值
-import config as _config
-OVERALL_PASS_THRESHOLD = getattr(_config, 'TIER_THRESHOLDS', {}).get('tier2', 0.75)
-GROUP_PASS_THRESHOLD_DEFAULT = 0.70  # 默认单组通过阈值（与 tier 无关的 fallback）
-
-# 连续卡死检测
-MAX_STUCK_ROUNDS = 3
-
-
-def _compute_tiers(group_ids: list[str]) -> dict[str, dict]:
-    """根据实际功能组数量动态计算 Tier 划分。
-    
-    策略：
-    - Functional Criteria (F1, F2, ...) 分配到 tier1/tier2
-    - Design Criteria (D) 和 Technical Criteria (T) 被忽略（不纳入退出判定）
-    - tier1: 前 50% Functional 组
-    - tier2: 后 50% Functional 组
-    - D/T 组不纳入退出判定，不阻塞项目成功
-    """
-    # 只保留 Functional 组
-    functional_groups = [g for g in group_ids if g.startswith("F")]
-    
-    n_func = len(functional_groups)
-    
-    # 划分 Functional 组到 tier1/tier2
-    if n_func <= 3:
-        # Functional 组很少，全部归 tier1
-        tier1_groups = functional_groups
-        tier2_groups = []
-    else:
-        split = n_func // 2
-        tier1_groups = functional_groups[:split]
-        tier2_groups = functional_groups[split:]
-    
-    # 从 config 读取阈值，支持动态调整
-    try:
-        import config as _config
-        tier1_threshold = getattr(_config, 'TIER_THRESHOLDS', {}).get('tier1', 0.95)
-        tier2_threshold = getattr(_config, 'TIER_THRESHOLDS', {}).get('tier2', 0.75)
-    except Exception:
-        tier1_threshold = 0.95
-        tier2_threshold = 0.75
-    
-    result: dict[str, dict] = {}
-    if tier1_groups:
-        result["tier1"] = {"groups": tier1_groups, "min_rate": tier1_threshold, "label": "MVP Core"}
-    if tier2_groups:
-        result["tier2"] = {"groups": tier2_groups, "min_rate": tier2_threshold, "label": "Core Experience"}
-    # NOTE: tier3 (D/T groups) removed — they don't block project success
-    
-    # 保底：如果没有任何 tier，所有组归 tier1
-    if not result:
-        result["tier1"] = {"groups": group_ids, "min_rate": tier1_threshold, "label": "All Features"}
-    
-    return result
-
-OVERALL_PASS_THRESHOLD = 0.75
-GROUP_PASS_THRESHOLD_DEFAULT = 0.70
-
-# 连续卡死检测
-MAX_STUCK_ROUNDS = 3
+GROUP_PASS_THRESHOLD_DEFAULT = 0.70  # 默认大组通过阈值
+OVERALL_PASS_THRESHOLD = 0.75  # 全局通过阈值
+MAX_STUCK_ROUNDS = 3  # 连续卡死检测
 
 
 # --------------------------------------------------------------------------- #
-#  从 contract.md 解析功能组
+#  从 contract.md 解析大组
 # --------------------------------------------------------------------------- #
 
+# 大组标题: ## Group 1: Core Canvas
 _GROUP_HEADER_RE = re.compile(
-    r"^#{2,4}\s+(F\d+|D\d*|T\d*)[\s:：.]+(.+)$",
+    r"^#{2}\s+Group\s+(\d+)[:：]\s*(.+)$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# 子功能标题: ### Infinite Canvas with Pan/Zoom
+_SUB_FEATURE_RE = re.compile(
+    r"^#{3}\s+(.+)$",
     re.MULTILINE,
 )
 
+# 标准项: - [ ] **G1.A.1** 测试场景 — 期望结果
+# 格式: G{group_num}.{sub_feature_letter}.{seq}
 _CRITERIA_RE = re.compile(
+    r'^\s*-\s+\[[^\]]*\]\s+\*\*G(?P<group>\d+)\.(?P<sub>[A-Z])\.(?P<seq>\d+)\*\*',
+    re.MULTILINE,
+)
+
+# 兼容旧格式: F1.1, F2.3 等（用于向后兼容）
+_LEGACY_CRITERIA_RE = re.compile(
     r'^\s*-\s+\[[^\]]*\]\s+\*\*(?P<id>[A-Z]\d+(?:\.\d+)?)\*\*',
     re.MULTILINE,
 )
 
-# Table-format: | **F1** | Feature Name | ... |
-_TABLE_GROUP_RE = re.compile(
-    r"\|\s*\*\*(F\d+|D\d*|T\d*)\*\*\s*\|\s*([^|]+)",
-)
-
 
 def parse_feature_groups(contract_text: str) -> list[dict]:
-    """Parse contract.md into feature groups.
+    """Parse contract.md into feature groups (大组模式).
 
-    Supports two formats:
-    1. Heading format: ### F1 Name  +  - [ ] **F1.1** ...
-    2. Table format:  | **F1** | Name | ... | (Architect-generated)
+    新格式:
+        ## Group 1: Core Canvas
+        ### Infinite Canvas
+        - [ ] **G1.A.1** Middle mouse button drag pans...
+        - [ ] **G1.A.2** Space + left mouse drag...
+        ### Shape Drawing
+        - [ ] **G1.B.1** Rectangle tool...
 
-    Returns list of {"id": "F1", "name": "Audio File Upload System", "criteria": ["F1.1", ...]}
+    兼容旧格式:
+        ### F1: Infinite Canvas
+        - [ ] **F1.1** Middle mouse button drag...
+
+    Returns list of {"id": "G1", "name": "Core Canvas", "criteria": ["G1.A.1", ...], "sub_features": [{"name": "...", "criteria": [...]}]}
     """
     groups: list[dict] = []
-
-    # --- Attempt 1: Heading + list format ---
     lines = contract_text.splitlines()
+
+    # --- Attempt 1: 大组格式 (Group N: Name) ---
+    current_group = None
+    current_sub = None
+
     for line in lines:
-        header_match = _GROUP_HEADER_RE.match(line.strip())
-        if header_match:
-            gid, name = header_match.groups()
+        # 检测大组标题
+        group_match = _GROUP_HEADER_RE.match(line.strip())
+        if group_match:
+            group_num, name = group_match.groups()
+            current_group = {
+                "id": f"G{group_num}",
+                "name": name.strip(),
+                "criteria": [],
+                "sub_features": [],
+            }
+            groups.append(current_group)
+            current_sub = None
+            continue
+
+        # 检测子功能标题
+        if current_group:
+            sub_match = _SUB_FEATURE_RE.match(line.strip())
+            if sub_match:
+                sub_name = sub_match.group(1).strip()
+                current_sub = {
+                    "name": sub_name,
+                    "criteria": [],
+                }
+                current_group["sub_features"].append(current_sub)
+                continue
+
+    # 提取标准项并分配到对应大组
+    for m in _CRITERIA_RE.finditer(contract_text):
+        group_num = m.group("group")
+        sub_letter = m.group("sub")
+        seq = m.group("seq")
+        cid = f"G{group_num}.{sub_letter}.{seq}"
+
+        # 找到对应的大组
+        target_group = None
+        for g in groups:
+            if g["id"] == f"G{group_num}":
+                target_group = g
+                break
+
+        if target_group:
+            target_group["criteria"].append(cid)
+            # 也分配到子功能
+            sub_idx = ord(sub_letter) - ord('A')
+            if 0 <= sub_idx < len(target_group.get("sub_features", [])):
+                target_group["sub_features"][sub_idx]["criteria"].append(cid)
+
+    if groups:
+        for g in groups:
+            g["criteria"] = sorted(set(g["criteria"]), key=_criteria_sort_key)
+            for sub in g.get("sub_features", []):
+                sub["criteria"] = sorted(set(sub["criteria"]), key=_criteria_sort_key)
+        total = sum(len(g["criteria"]) for g in groups)
+        log.info(f"[feature_groups] Parsed {len(groups)} groups, {total} criteria total (新格式)")
+        for g in groups:
+            log.info(f"  {g['id']}: {g['name']} ({len(g['criteria'])} criteria, {len(g.get('sub_features', []))} sub-features)")
+        return groups
+
+    # --- Attempt 2: 兼容旧格式 (F1, F2, ...) ---
+    log.warning("[feature_groups] No Group format found, trying legacy F-format")
+    return _parse_legacy_groups(contract_text)
+
+
+def _parse_legacy_groups(contract_text: str) -> list[dict]:
+    """解析旧格式的 F-group。"""
+    legacy_group_re = re.compile(
+        r"^#{2,4}\s+(F\d+|D\d*|T\d*)[\s:：.]+(.+)$",
+        re.MULTILINE,
+    )
+    groups: list[dict] = []
+
+    for line in contract_text.splitlines():
+        m = legacy_group_re.match(line.strip())
+        if m:
+            gid, name = m.groups()
             groups.append({
                 "id": gid,
                 "name": name.strip(),
                 "criteria": [],
+                "sub_features": [],
             })
 
-    for m in _CRITERIA_RE.finditer(contract_text):
+    for m in _LEGACY_CRITERIA_RE.finditer(contract_text):
         cid = m.group("id")
-        # Assign to nearest preceding group whose ID is a prefix of this criterion
-        # e.g., F1.1 -> F1, F10.1 -> F10, D1 -> D
         for g in reversed(groups):
             if cid.startswith(g["id"] + ".") or cid == g["id"]:
                 g["criteria"].append(cid)
                 break
 
-    if groups:
-        for g in groups:
-            g["criteria"] = sorted(set(g["criteria"]), key=_criteria_sort_key)
-        total = sum(len(g["criteria"]) for g in groups)
-        log.info(f"[feature_groups] Parsed {len(groups)} groups, {total} criteria total")
-        return groups
-
-    # --- Attempt 2: Table format fallback ---
-    log.warning("[feature_groups] No heading-format groups found, trying table format")
-    table_groups: dict[str, dict] = {}
-    for line in lines:
-        # Skip header separator lines
-        if re.match(r"^\|[-\s|]+$", line.strip()):
-            continue
-        m = _TABLE_GROUP_RE.search(line)
-        if m:
-            gid, name = m.groups()
-            gid = gid.strip()
-            name = name.strip()
-            if gid not in table_groups:
-                table_groups[gid] = {
-                    "id": gid,
-                    "name": name,
-                    "criteria": [],
-                }
-            # Assign a virtual criterion number (F1.1, F1.2, ...)
-            n = len(table_groups[gid]["criteria"]) + 1
-            table_groups[gid]["criteria"].append(f"{gid}.{n}")
-
-    groups = list(table_groups.values())
     for g in groups:
         g["criteria"] = sorted(set(g["criteria"]), key=_criteria_sort_key)
 
     total = sum(len(g["criteria"]) for g in groups)
-    log.info(f"[feature_groups] Table format: {len(groups)} groups, {total} criteria total")
-    for g in groups:
-        log.debug(f"  {g['id']}: {g['name']} ({len(g['criteria'])} criteria)")
-
+    log.info(f"[feature_groups] Legacy format: {len(groups)} groups, {total} criteria total")
     return groups
 
 
 def _criteria_sort_key(cid: str) -> tuple:
-    """Sort criteria like F1.1, F1.2, F10.1."""
+    """Sort criteria like G1.A.1, G1.B.3, G2.C.1."""
     import re as _re
+    # 新格式: G1.A.1
+    m = _re.match(r"G(\d+)\.([A-Z])\.(\d+)", cid)
+    if m:
+        return (0, int(m.group(1)), m.group(2), int(m.group(3)))
+    # 旧格式: F1.1
     m = _re.match(r"([A-Z])(\d+)(?:\.(\d+))?", cid)
-    if not m:
-        return (cid, 0, 0)
-    letter = m.group(1)
-    major = int(m.group(2))
-    minor = int(m.group(3) or 0)
-    return (letter, major, minor)
+    if m:
+        return (1, m.group(1), int(m.group(2)), int(m.group(3) or 0))
+    return (999, cid, 0, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -192,17 +194,12 @@ def _criteria_sort_key(cid: str) -> tuple:
 # --------------------------------------------------------------------------- #
 
 class FeatureGroupState:
-    """维护功能组的推进状态。"""
+    """维护大组的推进状态。"""
 
     def __init__(self, groups: list[dict]):
-        self.groups = groups  # [{"id": "F1", "name": "...", "criteria": [...]}, ...]
+        self.groups = groups  # [{"id": "G1", "name": "...", "criteria": [...], "sub_features": [...]}, ...]
         self.group_ids = [g["id"] for g in groups]
         self.group_map = {g["id"]: g for g in groups}
-
-        # 动态计算 tier 划分
-        global TIER_REQUIREMENTS
-        TIER_REQUIREMENTS = _compute_tiers(self.group_ids)
-        log.info(f"[feature_groups] Dynamic tiers: { {k: len(v['groups']) for k,v in TIER_REQUIREMENTS.items()} }")
 
         # 每轮结束后更新：group_id -> 最新通过率 (0.0-1.0)
         self.pass_rates: dict[str, float] = {}
@@ -212,6 +209,9 @@ class FeatureGroupState:
 
         # 当前指针（group_ids 中的索引）
         self.current_idx = 0
+
+        # CRITICAL_BUG 追踪：group_id -> bool
+        self.critical_bugs: dict[str, bool] = {}
 
     @property
     def current_group(self) -> dict | None:
@@ -225,7 +225,7 @@ class FeatureGroupState:
         return g["id"] if g else ""
 
     def advance(self) -> bool:
-        """推进到下一个功能组。返回是否成功推进。"""
+        """推进到下一个大组。返回是否成功推进。"""
         if self.current_idx < len(self.group_ids) - 1:
             self.current_idx += 1
             log.info(
@@ -236,71 +236,53 @@ class FeatureGroupState:
         log.info("[feature_groups] All groups completed")
         return False
 
-    def update_rate(self, group_id: str, rate: float) -> None:
-        """更新某功能组的最新通过率。"""
+    def update_rate(self, group_id: str, rate: float, has_critical_bug: bool = False) -> None:
+        """更新某大组的最新通过率和 CRITICAL_BUG 状态。"""
         old_rate = self.pass_rates.get(group_id, 0.0)
         self.pass_rates[group_id] = rate
+        self.critical_bugs[group_id] = has_critical_bug
 
-        threshold = _get_group_threshold(group_id)
-        if rate >= threshold:
+        threshold = GROUP_PASS_THRESHOLD_DEFAULT
+        passed = rate >= threshold and not has_critical_bug
+
+        if passed:
             self.stuck_counts[group_id] = 0
             log.info(
                 f"[feature_groups] {group_id} passed at {rate:.0%} "
-                f"(threshold {threshold:.0%})"
+                f"(threshold {threshold:.0%}, no critical bug)"
             )
         else:
             self.stuck_counts[group_id] = self.stuck_counts.get(group_id, 0) + 1
+            reason = "below threshold" if rate < threshold else "critical bug"
             log.info(
                 f"[feature_groups] {group_id} not yet passed: {rate:.0%} "
-                f"(threshold {threshold:.0%}, stuck={self.stuck_counts[group_id]})"
+                f"(threshold {threshold:.0%}, {reason}, stuck={self.stuck_counts[group_id]})"
             )
 
     def check_should_advance(self) -> bool:
-        """检查当前功能组是否达到通过阈值，可以推进。"""
+        """检查当前大组是否达到通过条件，可以推进。
+
+        通过条件：
+        1. 通过率 >= 阈值
+        2. 无 CRITICAL_BUG
+        """
         gid = self.current_group_id
         if not gid:
             return False
         rate = self.pass_rates.get(gid, 0.0)
-        threshold = _get_group_threshold(gid)
-        return rate >= threshold
+        has_bug = self.critical_bugs.get(gid, False)
+        threshold = GROUP_PASS_THRESHOLD_DEFAULT
+        return rate >= threshold and not has_bug
 
     def is_complete(self) -> bool:
-        """检查是否所有功能组都已完成。"""
+        """检查是否所有大组都已完成。"""
+        threshold = GROUP_PASS_THRESHOLD_DEFAULT
         for gid in self.group_ids:
-            threshold = _get_group_threshold(gid)
-            if self.pass_rates.get(gid, 0.0) < threshold:
+            rate = self.pass_rates.get(gid, 0.0)
+            has_bug = self.critical_bugs.get(gid, False)
+            if rate < threshold or has_bug:
                 return False
         return True
-
-    def tier_status(self) -> dict:
-        """返回各 Tier 的完成状态。"""
-        def _tier_rate(groups: list[str]) -> float:
-            total = sum(len(self.group_map[g]["criteria"]) for g in groups if g in self.group_map)
-            passed = sum(
-                len(self.group_map[g]["criteria"]) * self.pass_rates.get(g, 0.0)
-                for g in groups if g in self.group_map
-            )
-            return passed / total if total > 0 else 0.0
-
-        def _tier_groups_complete(groups: list[str], threshold: float) -> tuple[int, int]:
-            complete = sum(
-                1 for g in groups
-                if g in self.group_map and self.pass_rates.get(g, 0.0) >= threshold
-            )
-            return complete, len(groups)
-
-        result = {}
-        for tier_name, cfg in TIER_REQUIREMENTS.items():
-            grp = cfg["groups"]
-            comp, total = _tier_groups_complete(grp, cfg["min_rate"])
-            result[tier_name] = {
-                "rate": _tier_rate(grp),
-                "groups_complete": comp,
-                "groups_total": total,
-                "min_rate": cfg["min_rate"],
-                "passed": comp == total,
-            }
-        return result
 
     def overall_rate(self) -> float:
         """计算全局 overall 通过率。"""
@@ -311,8 +293,14 @@ class FeatureGroupState:
         )
         return passed_criteria / total_criteria if total_criteria > 0 else 0.0
 
+    def check_group_passed(self, group_id: str) -> bool:
+        """检查指定大组是否已通过（通过阈值且无 CRITICAL_BUG）。"""
+        rate = self.pass_rates.get(group_id, 0.0)
+        has_bug = self.critical_bugs.get(group_id, False)
+        return rate >= GROUP_PASS_THRESHOLD_DEFAULT and not has_bug
+
     def any_group_stuck(self) -> tuple[bool, str | None]:
-        """检查是否有功能组连续卡死。"""
+        """检查是否有大组连续卡死。"""
         for gid, count in self.stuck_counts.items():
             if count >= MAX_STUCK_ROUNDS:
                 return True, gid
@@ -324,17 +312,18 @@ class FeatureGroupState:
             "current_group": self.current_group_id,
             "pass_rates": dict(self.pass_rates),
             "stuck_counts": dict(self.stuck_counts),
+            "critical_bugs": dict(self.critical_bugs),
             "overall": self.overall_rate(),
-            "tier_status": self.tier_status(),
         }
 
     @classmethod
     def from_dict(cls, data: dict, groups: list[dict]) -> "FeatureGroupState":
-        """从字典恢复功能组状态。"""
+        """从字典恢复大组状态。"""
         state = cls(groups)
         state.current_idx = data.get("current_idx", 0)
         state.pass_rates = dict(data.get("pass_rates", {}))
         state.stuck_counts = dict(data.get("stuck_counts", {}))
+        state.critical_bugs = dict(data.get("critical_bugs", {}))
         # Ensure current_idx is valid
         if state.current_idx >= len(state.group_ids):
             state.current_idx = len(state.group_ids) - 1
@@ -342,63 +331,61 @@ class FeatureGroupState:
             state.current_idx = 0
         log.info(
             f"[feature_groups] Restored from state: current={state.current_group_id}, "
-            f"pass_rates={len(state.pass_rates)}, stuck_counts={len(state.stuck_counts)}"
+            f"pass_rates={len(state.pass_rates)}, critical_bugs={sum(state.critical_bugs.values())}"
         )
         return state
 
 
-def _get_group_threshold(group_id: str) -> float:
-    """获取功能组的通过阈值。"""
-    for tier_name, cfg in TIER_REQUIREMENTS.items():
-        if group_id in cfg["groups"]:
-            return cfg["min_rate"]
-    return GROUP_PASS_THRESHOLD_DEFAULT
-
-
 def _check_exit_condition_dynamic(feature_groups: "FeatureGroupState") -> tuple[bool, str]:
-    """动态退出条件：只检查 tier1 和 tier2，D/T 组不阻塞成功。"""
+    """动态退出条件：所有大组通过即可退出。"""
     if not feature_groups:
         return False, "No feature groups"
-    
-    ts = feature_groups.tier_status()
+
+    if not feature_groups.is_complete():
+        current = feature_groups.current_group
+        current_id = current["id"] if current else "?"
+        current_rate = feature_groups.pass_rates.get(current_id, 0.0)
+        has_bug = feature_groups.critical_bugs.get(current_id, False)
+        return False, (
+            f"Group {current_id} not passed: {current_rate:.0%}, "
+            f"critical_bug={has_bug}"
+        )
+
     overall = feature_groups.overall_rate()
-    
-    # 只检查 tier1 和 tier2（功能性标准）
-    # tier3 (D/T) 被忽略，不阻塞项目成功
-    for tier_name in ("tier1", "tier2"):
-        status = ts.get(tier_name)
-        if status is None:
-            continue
-        if not status["passed"]:
-            return False, (
-                f"{TIER_REQUIREMENTS.get(tier_name, {}).get('label', tier_name)} "
-                f"incomplete: {status['groups_complete']}/{status['groups_total']} "
-                f"groups, overall {overall:.0%}"
-            )
-    
-    # 检查 overall（仍然保留作为全局质量门槛）
     if overall < OVERALL_PASS_THRESHOLD:
         return False, f"Overall {overall:.0%} below threshold {OVERALL_PASS_THRESHOLD:.0%}"
-    
-    # 检查 stuck groups（仍然保留，防止无限循环）
+
+    # 检查 stuck groups
     stuck, stuck_gid = feature_groups.any_group_stuck()
     if stuck:
         return False, f"Group {stuck_gid} stuck for {feature_groups.stuck_counts.get(stuck_gid, 0)} rounds"
-    
-    return True, f"All functional tiers passed (tier1=100%, tier2>=90%), overall {overall:.0%}"
+
+    return True, f"All groups passed, overall {overall:.0%}"
 
 
 def get_group_instruction(group_id: str, group: dict) -> str:
-    """生成功能组的中文说明，注入 Builder prompt。"""
+    """生成大组的中文说明，注入 Builder prompt。"""
     lines = [
         f"## 当前 Sprint 目标：{group_id} — {group['name']}",
         f"",
         f"本轮你只需实现并完善 **{group_id}** 的功能。",
-        f"验收标准：contract.md 中 {group_id}.1 ~ {group_id}.{len(group['criteria'])} 共 {len(group['criteria'])} 项。",
+        f"验收标准：contract.md 中 {group_id} 的 {len(group['criteria'])} 项标准。",
         f"",
+    ]
+
+    # 添加子功能列表
+    sub_features = group.get("sub_features", [])
+    if sub_features:
+        lines.append(f"**组内实现顺序**：")
+        for i, sub in enumerate(sub_features, 1):
+            lines.append(f"{i}. {sub['name']} ({len(sub['criteria'])} 项标准)")
+        lines.append("")
+
+    lines.extend([
         f"**重要规则**：",
-        f"- 不要实现其他功能组（如 F5、F9）的内容",
+        f"- 按组内顺序实现，不要跳过",
+        f"- 不要实现其他大组（如 {group_id} 以外的）的内容",
         f"- 如果 {group_id} 的代码已部分存在，检查并修复它",
         f"- 完成后用 git commit 提交",
-    ]
+    ])
     return "\n".join(lines)

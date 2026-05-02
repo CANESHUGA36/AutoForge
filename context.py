@@ -197,11 +197,21 @@ def restore_from_checkpoint(checkpoint: str, system_prompt: str) -> list[dict]:
     """从 checkpoint 恢复"""
     git_context = ""
     try:
-        result = subprocess.run(
-            "git diff --stat HEAD~5 2>/dev/null || git log --oneline -5 2>/dev/null",
-            shell=True, cwd=config.WORKSPACE, capture_output=True, text=True, timeout=10,
-            **config.SUBPROCESS_TEXT_KWARGS,
-        )
+        # FIX: Use Python-compatible approach instead of Unix shell syntax
+        # First try git diff --stat, fallback to git log
+        git_context = ""
+        for git_cmd in ["git diff --stat HEAD~5", "git log --oneline -5"]:
+            try:
+                result = subprocess.run(
+                    git_cmd, shell=True, cwd=config.WORKSPACE,
+                    capture_output=True, text=True, timeout=10,
+                    **config.SUBPROCESS_TEXT_KWARGS,
+                )
+                if result.stdout.strip():
+                    git_context = f"\n\nRecent code changes:\n```\n{result.stdout.strip()[:2000]}\n```"
+                    break
+            except Exception:
+                continue
         if result.stdout.strip():
             git_context = f"\n\nRecent code changes:\n```\n{result.stdout.strip()[:2000]}\n```"
     except Exception:

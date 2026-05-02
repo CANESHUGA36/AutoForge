@@ -1,12 +1,13 @@
 services:
   autoforge:
-    image: autoforge:v2
+    # Use the latest image with all fixes (browser leak, dev server cleanup, etc.)
+    image: autoforge:v8
     # Loads OPENAI_API_KEY, OPENAI_BASE_URL, HARNESS_MODEL, etc. from .env file
     env_file: .env
     environment:
       # Auto-generated workspaces go under this path (must match the volume mount target).
       HARNESS_PROJECTS_DIR: /projects
-      # Enable new validation layers by default
+      # Feature group validation layers (Reviewer autonomously decides when to use them)
       CONTRACT_TEST_ENABLED: "true"
       REACT_DEVTOOLS_ENABLED: "true"
     volumes:

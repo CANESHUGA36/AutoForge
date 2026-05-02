@@ -357,26 +357,36 @@ class ReactDevToolsChecker:
         }
 
     def _get_checks_for_group(self, group_id: str) -> list[tuple[str, Callable]]:
-        """获取功能组对应的检查列表"""
+        """获取功能组对应的检查列表
+        
+        支持旧格式 F1-F7 和新格式 G1-G4。
+        新格式映射：
+        - G1 (Core) → base + shape + cursor
+        - G2 (Content) → text + shape
+        - G3 (Editing) → cursor + shape
+        - G4 (Output) → base
+        """
         checks = []
-
-        if group_id in ("F1", "F2", "F3", "F4"):
-            # MVP 组：检查基础组件
+        
+        # 统一处理新旧格式
+        is_core = group_id in ("F1", "F2", "F3", "F4", "G1")
+        is_content = group_id in ("F4", "F5", "G2")
+        is_editing = group_id in ("F5", "F6", "F7", "G3")
+        is_output = group_id in ("F8", "F9", "F10", "F11", "G4")
+        
+        if is_core:
             checks.append(("base_components", self._check_base_components))
-
-        if group_id in ("F5", "F6"):
-            # 光标/存在性
+        
+        if is_content or is_editing:
             checks.append(("cursor_components", self._check_cursor_components))
-
-        if group_id in ("F2", "F3", "F7"):
-            # 绘图/形状
+        
+        if is_core or is_editing:
             checks.append(("shape_components", self._check_shape_components))
-
-        if group_id in ("F4",):
-            # 文本
+        
+        if is_content:
             checks.append(("text_components", self._check_text_components))
 
-        # 通用检查
+        # 通用检查（所有组都做）
         checks.append(("react_mount", self._check_react_mount))
 
         return checks

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -284,7 +285,7 @@ class Agent:
                     tool_text = json.dumps(arguments).lower()
                     is_env_fix = (
                         name == "project_init"
-                        or any(__import__('re').search(p, tool_text) for p in _ENV_FIX_PATTERNS)
+                        or any(re.search(p, tool_text) for p in _ENV_FIX_PATTERNS)
                     )
                     if is_env_fix:
                         consecutive_env_fixes += 1

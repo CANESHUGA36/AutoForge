@@ -54,12 +54,10 @@ def test_inject_iteration_budget_multiple_formats(mock_workspace, harness_instan
     assert "Iteration Budget" in result
 
 
-def test_dimension_threshold_syncs_overall_score(mock_workspace, harness_instance):
-    """BUG #2: When dimension threshold fails, overall_score should sync with capped score."""
+def test_big_group_mode_no_dimension_thresholds(mock_workspace, harness_instance):
+    """Big-group mode: dimension thresholds are deprecated, Reviewer makes autonomous decisions."""
     from harness.eval import parse_dimension_scores, check_dimension_thresholds
 
-    # Simulate eval text with one failing dimension (design_quality below threshold)
-    # Note: parse_dimension_scores expects ### heading format
     eval_text = """
 Overall Score: 8.5/10
 Sprint Score: 7.0/10
@@ -67,15 +65,7 @@ Sprint Score: 7.0/10
 ### Design Quality: 2/10
 ### Craft: 8/10
 """
-    sprint_score, overall_score = (7.0, 8.5)
     dim_scores = parse_dimension_scores(eval_text)
     failed_dims = check_dimension_thresholds(dim_scores)
-    assert failed_dims, f"Expected design_quality to fail threshold, got dim_scores={dim_scores}"
-
-    score = overall_score
-    if failed_dims and score >= config.PASS_THRESHOLD:
-        score = config.PASS_THRESHOLD - 0.1
-        overall_score = score  # BUG #2 fix: sync
-
-    assert score == config.PASS_THRESHOLD - 0.1
-    assert overall_score == score  # Must be synced
+    # In big-group mode, dimension thresholds don't block
+    assert failed_dims == [], "Big-group mode should not use dimension thresholds"

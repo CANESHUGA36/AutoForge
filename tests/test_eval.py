@@ -16,13 +16,16 @@ def test_parse_scores_missing():
     assert overall == 8.0
 
 
-def test_check_dimension_thresholds_functionality_fail():
+def test_check_dimension_thresholds_deprecated():
+    """Big-group mode: dimension thresholds are deprecated, always returns []."""
     scores = {"functionality": 4.0, "design_quality": 5.0}
     failed = check_dimension_thresholds(scores)
-    assert "functionality" in [f.split("=")[0] for f in failed]
+    # In big-group mode, Reviewer makes autonomous decisions
+    assert failed == []
 
 
 def test_check_dimension_thresholds_all_pass():
+    """Big-group mode: always returns [] regardless of scores."""
     scores = {"functionality": 6.0, "design_quality": 5.0}
     failed = check_dimension_thresholds(scores)
     assert failed == []

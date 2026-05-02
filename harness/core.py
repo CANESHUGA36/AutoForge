@@ -6,6 +6,7 @@ Harness        ?
 from __future__ import annotations
 import json
 import logging
+import re
 import time
 from pathlib import Path
 import config
@@ -24,7 +25,7 @@ from harness.contract_tests import ContractTestRunner
 from harness.react_devtools import ReactDevToolsChecker
 from harness.feature_groups import (
     FeatureGroupState, parse_feature_groups, get_group_instruction,
-    TIER_REQUIREMENTS, OVERALL_PASS_THRESHOLD, _get_group_threshold,
+    OVERALL_PASS_THRESHOLD, GROUP_PASS_THRESHOLD_DEFAULT,
     _check_exit_condition_dynamic,
 )
 from harness.logging import setup_file_logging, log_round_stats, log_final_stats
@@ -70,7 +71,7 @@ class Harness:
         architect_tools = CORE_TOOLS | GEN_TOOLS | {"search_web"}
         sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
         builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS
-        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"contract_test_run", "react_devtools_inspect"}
+        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"contract_test_run", "react_devtools_inspect", "check_console_logs", "detect_framework", "run_diagnostics"}
         judge_tools = CORE_TOOLS | {"read_file", "write_file", "read_skill_file"}
 
         self.architect = Agent("Architect", ARCHITECT_SYSTEM, TOOL_SCHEMAS, allowed_tools=architect_tools, logger=self.log)
@@ -461,25 +462,36 @@ class Harness:
 
         # ScreenshotGate 和 GitCommit 已在 Pipeline 中完成（不阻塞）
 
-        # ===== FIX: Restart dev server BEFORE Reviewer to ensure fresh compile =====
-        # Builder may have modified files; Vite HMR can fail in certain edge cases.
-        # Restarting guarantees Reviewer sees the latest code.
-        self.log.info("[dev_server] Restarting dev server before Reviewer...")
-        from tools_impl import _kill_dev_server, start_dev_server
-        from harness.build import _detect_project_port
-        _kill_dev_server()
-        time.sleep(2)
+        # ===== Restart dev server BEFORE Reviewer only if Builder modified files =====
+        # Builder's file writes trigger auto-restart via _restart_dev_server_if_running().
+        # Only restart if the server is not responding or if explicitly needed.
         pkg = self.workspace / "package.json"
         if pkg.exists():
+            from tools_impl import _kill_dev_server, start_dev_server
+            from harness.build import _detect_project_port
+            import urllib.request
+            
             port = _detect_project_port(self.workspace)
-            wait = max(getattr(config, 'DEV_SERVER_DEFAULT_WAIT', 8), 15)
-            # Use --force flag to ensure Vite invalidates all caches
-            result = start_dev_server("npm run dev --force", port=port, wait=wait)
-            if not result.startswith("[error]"):
-                self.log.info(f"[dev_server] Restarted on port {port} for Reviewer")
+            dev_server_ok = False
+            try:
+                req = urllib.request.Request(f"http://localhost:{port}", method="HEAD")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    dev_server_ok = resp.status == 200
+            except Exception:
+                pass
+            
+            if not dev_server_ok:
+                self.log.info("[dev_server] Dev server not responding, restarting before Reviewer...")
+                _kill_dev_server()
+                time.sleep(2)
+                wait = max(getattr(config, 'DEV_SERVER_DEFAULT_WAIT', 8), 15)
+                result = start_dev_server("npm run dev --force", port=port, wait=wait)
+                if not result.startswith("[error]"):
+                    self.log.info(f"[dev_server] Restarted on port {port} for Reviewer")
+                else:
+                    self.log.warning(f"[dev_server] Restart failed: {result}")
             else:
-                self.log.warning(f"[dev_server] Restart failed: {result}")
-        time.sleep(1)
+                self.log.info("[dev_server] Dev server healthy, skipping restart before Reviewer")
 
         # ===== Evaluate =====
         return self._run_evaluation(round_num, round_start, build_usage, strategy)
@@ -653,94 +665,9 @@ class Harness:
             current_group_id = self.feature_groups.current_group_id
 
         # =====================================================================
-        #  Step 0: 分层验证（Contract Tests + React DevTools）
+        #  Step 1: Reviewer（自主测试 + 直接生成 feedback）
         # =====================================================================
-        layer_scores = {}
-        if current_group_id and getattr(config, 'CONTRACT_TEST_ENABLED', True):
-            self.log.info(f"[validation] Step 0: Running layered validation for {current_group_id}")
-            
-            # 0a: Contract Tests（静态代码分析）
-            try:
-                from harness.contract_tests import ContractTestRunner
-                ct_runner = ContractTestRunner(self.workspace)
-                ct_result = ct_runner.run_for_group(current_group_id)
-                layer_scores["contract_tests"] = ct_result["score"] / 100.0
-                self.log.info(
-                    f"[contract_test] {current_group_id}: score={ct_result['score']:.0f}% "
-                    f"passed={ct_result['passed']} "
-                    f"(tests={ct_result.get('tests_run', 0)}/{ct_result.get('testable_criteria', 0)})"
-                )
-            except Exception as e:
-                self.log.warning(f"[contract_test] Failed: {e}")
-                layer_scores["contract_tests"] = 0.0
-
-            # 0b: React DevTools（Fiber 树检查）— 仅对 React 项目运行
-            # 先检测项目类型，非 React 项目自动给 100% 不惩罚
-            is_react_project = False
-            try:
-                # 检测 workspace 是否有 React 相关文件
-                pkg_json = self.workspace / "package.json"
-                if pkg_json.exists():
-                    pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
-                    deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-                    is_react_project = "react" in deps or "react-dom" in deps
-                # 也检查源码中是否有 React import
-                if not is_react_project:
-                    for src_file in self.workspace.rglob("*.tsx"):
-                        if src_file.stat().st_size < 100000:  # 避免大文件
-                            content = src_file.read_text(encoding="utf-8", errors="replace")
-                            if "from 'react'" in content or 'from "react"' in content:
-                                is_react_project = True
-                                break
-            except Exception:
-                pass
-
-            if is_react_project:
-                try:
-                    from tools.playwright_mcp import _get_page
-                    import asyncio
-                    
-                    async def _run_react_devtools():
-                        session = await _get_page()
-                        try:
-                            dev_server_url = getattr(config, 'DEV_SERVER_URL', 'http://localhost:5173')
-                            try:
-                                current_info = await session.execute_script(
-                                    "() => ({ url: window.location.href, ready: document.readyState })"
-                                )
-                                if not current_info or not isinstance(current_info, dict) or 'localhost' not in str(current_info.get('url', '')):
-                                    await session.navigate(dev_server_url, fresh=False, wait=3)
-                            except Exception:
-                                await session.navigate(dev_server_url, fresh=False, wait=3)
-                            
-                            await asyncio.sleep(1)
-                            
-                            dt_checker = ReactDevToolsChecker(session)
-                            return await dt_checker.check_feature_group(current_group_id)
-                        finally:
-                            # FIX: Always close session to prevent Chrome process accumulation
-                            try:
-                                await session.close()
-                            except Exception:
-                                pass
-                    
-                    dt_result = asyncio.run(_run_react_devtools())
-                    layer_scores["react_devtools"] = dt_result["score"] / 100.0
-                    self.log.info(
-                        f"[react_devtools] {current_group_id}: score={dt_result['score']:.0f}% "
-                        f"passed={dt_result['passed']}"
-                    )
-                except Exception as e:
-                    self.log.warning(f"[react_devtools] Skipped (no browser): {e}")
-                    layer_scores["react_devtools"] = None  # 标记为不可用
-            else:
-                self.log.info("[react_devtools] Non-React project — skipped with 100%")
-                layer_scores["react_devtools"] = 1.0  # 非 React 项目不惩罚
-
-        # =====================================================================
-        #  Step 1: Reviewer（自适应验证深度 + 直接生成 feedback）
-        # =====================================================================
-        self.log.info("Evaluate phase — Step 1: Reviewer (unified review + feedback)")
+        self.log.info("Evaluate phase — Step 1: Reviewer (autonomous review + feedback)")
         self.dashboard.start_agent("Reviewer")
 
         # Inject current feature group into Reviewer task
@@ -748,50 +675,36 @@ class Harness:
         if self.feature_groups and self.feature_groups.current_group:
             cg = self.feature_groups.current_group
             group_section = (
-                f"\n当前验证功能组: {cg['id']} — {cg['name']}\n"
-                f"验收标准范围: {cg['id']}.1 ~ {cg['id']}.{len(cg['criteria'])}\n"
-                f"你只验证这个功能组的标准，不要检查其他功能组。\n"
+                f"\n当前验证大组: {cg['id']} — {cg['name']}\n"
+                f"验收标准范围: {cg['id']} 的 {len(cg['criteria'])} 项标准\n"
+                f"你只验证这个大组的标准，不要检查其他大组。\n"
             )
-            # 注入分层验证结果到 Reviewer 提示
-            if layer_scores:
-                group_section += "\n## 分层验证结果（必须使用）\n"
-                if "contract_tests" in layer_scores:
-                    ct_score = layer_scores['contract_tests']
-                    group_section += f"- 契约测试（代码静态分析）: {ct_score:.0%}\n"
-                    # 根据契约测试分数给出明确指导
-                    if ct_score >= 0.8:
-                        group_section += "  → 契约测试通过，代码结构正确。优先信任此结果。\n"
-                    elif ct_score >= 0.5:
-                        group_section += "  → 契约测试部分通过，需要检查具体失败项。\n"
-                    else:
-                        group_section += "  → 契约测试失败，代码结构有严重问题。\n"
-                if layer_scores.get("react_devtools") is not None:
-                    dt_score = layer_scores['react_devtools']
-                    group_section += f"- React DevTools（组件树检查）: {dt_score:.0%}\n"
-                group_section += "\n**重要**: 这些结果已自动收集。\n"
-                group_section += "- 契约测试通过的项，不需要再用 browser_check 验证\n"
-                group_section += "- 浏览器测试仅用于验证用户交互和视觉表现（最多 2 次）\n"
-                group_section += "- 如果契约测试通过但浏览器找不到元素，可能是 DOM 时序问题，信任契约测试\n"
+            # 添加子功能列表
+            sub_features = cg.get("sub_features", [])
+            if sub_features:
+                group_section += "\n组内子功能（按此顺序实现）：\n"
+                for i, sub in enumerate(sub_features, 1):
+                    group_section += f"{i}. {sub['name']} ({len(sub['criteria'])} 项标准)\n"
         
         # 自适应验证预算
         reviewer_budget, strategy_hint = self._calculate_reviewer_budget(round_num)
 
-        # FIX: Reviewer now generates feedback.md directly. No Judge involved.
+        # Reviewer 自主测试任务
         review_task = (
             f"Review the codebase and test the web app for round {round_num}.\n"
             f"{group_section}"
             f"{strategy_hint}\n\n"
-            f"验证步骤（严格执行）：\n"
-            f"1. 读取 contract.md 当前功能组标准（{cg['id']}.1 ~ {cg['id']}.{len(cg['criteria'])}）\n"
-            f"2. 读取相关源码文件（最多 5 个）\n"
-            f"3. 运行 contract_test_run(feature_group='{cg['id']}') 获取静态分析结果\n"
-            f"4. 基于代码审查 + 契约测试判定大部分标准\n"
-            f"5. 仅对需要交互验证的项使用 browser_check（最多 2 次）\n"
-            f"6. 写 review report 和 feedback\n\n"
+            f"验证步骤（由你自主执行）：\n"
+            f"1. 调用 detect_framework() 检测项目类型\n"
+            f"2. 调用 check_console_logs() 进行健康检查\n"
+            f"3. 读取 contract.md 当前大组标准\n"
+            f"4. 读取相关源码文件（最多 8 个）\n"
+            f"5. 按需调用测试工具（contract_test_run, browser_check, react_devtools_inspect, run_diagnostics）\n"
+            f"6. 综合所有测试结果，写 review report 和 feedback\n\n"
             f"Produce TWO outputs:\n"
             f"   a) Save detailed review report to `.eval_cache/round_{round_num}_review.md`\n"
             f"   b) Save feedback for Builder to `{config.FEEDBACK_FILE}` (workspace root)\n"
-            f"      The feedback must include GROUP_PASS_RATE, Passed/Failed list, and actionable fix guidance.\n"
+            f"      The feedback must include GROUP_PASS_RATE, CRITICAL_BUG status, Passed/Failed list, and actionable fix guidance.\n"
             f"Limit: {reviewer_budget} iterations max."
         )
         review_result, review_usage = self.reviewer.run_with_stats(review_task, max_iterations=reviewer_budget)
@@ -835,6 +748,31 @@ class Harness:
             contract_rate = 0.0
         if sprint_rate is None:
             sprint_rate = contract_rate if contract_rate is not None else 0.0
+
+        # 检测 CRITICAL_BUG
+        # 注意：需要区分 "CRITICAL_BUG: 无" (无bug) 和 "CRITICAL_BUG: 有/YES" (有bug)
+        has_critical_bug = False
+        # 先检查明确的 bug 标记（是/有/yes/true）
+        # 使用 .*? 允许中间有其他字符（如 emoji、警告符号等）
+        critical_bug_positive_patterns = [
+            r'CRITICAL_BUG\s*[:：]\s*.*?(?:有|是|yes|true|存在|found|detected)',
+            r'CRITICAL\s*BUG\s*[:：]\s*.*?(?:有|是|yes|true|存在|found|detected)',
+            r'CRITICAL_BUG\s*[=＝]\s*(?:yes|true|1)',
+        ]
+        # 再检查明确的 无bug 标记，避免误报
+        critical_bug_negative_patterns = [
+            r'CRITICAL_BUG\s*[:：]\s*.*?(?:无|否|no|false|不存在|none|0)',
+            r'CRITICAL\s*BUG\s*[:：]\s*.*?(?:无|否|no|false|不存在|none|0)',
+        ]
+        
+        has_positive = any(re.search(p, eval_text, re.IGNORECASE) for p in critical_bug_positive_patterns)
+        has_negative = any(re.search(p, eval_text, re.IGNORECASE) for p in critical_bug_negative_patterns)
+        
+        if has_positive and not has_negative:
+            has_critical_bug = True
+            self.log.warning(f"[reviewer] CRITICAL_BUG detected in feedback — group cannot advance")
+        elif has_negative:
+            self.log.info(f"[reviewer] CRITICAL_BUG explicitly marked as 'none' — no bug")
 
         # ------------------------------------------------------------------ #
         #  Cross-validate with contract.md true denominator
@@ -902,94 +840,25 @@ class Harness:
             sprint_rate = 0.0
 
         # =====================================================================
-        #  应用分层验证分数（加权聚合）
+        #  大组模式：直接信任 Reviewer 的判定，不做权重聚合
         # =====================================================================
-        if layer_scores and current_group_id:
-            # 获取框架适配器的权重
-            try:
-                adapter = get_framework_adapter(self.workspace)
-                weights = adapter.get_evaluation_weights()
-            except Exception:
-                weights = config.EVALUATION_WEIGHTS
-
-            # 计算加权总分
-            # browser_tests 分数来自 Reviewer 的 contract_rate
-            weighted_score = 0.0
-            weight_sum = 0.0
-
-            # Code review: 来自 Reviewer 的评估（用 contract_rate 作为代理）
-            weighted_score += contract_rate * weights.get("code_review", 0.40)
-            weight_sum += weights.get("code_review", 0.40)
-
-            # Contract tests
-            ct_score = layer_scores.get("contract_tests", 0.0)
-            if ct_score is not None:
-                weighted_score += ct_score * weights.get("contract_tests", 0.35)
-                weight_sum += weights.get("contract_tests", 0.35)
-
-            # Contract tests
-            ct_score = layer_scores.get("contract_tests", 0.0)
-            if ct_score is not None:
-                weighted_score += ct_score * weights.get("contract_tests", 0.35)
-                weight_sum += weights.get("contract_tests", 0.35)
-            else:
-                # 未运行契约测试 → 视为通过（100%），避免拉低总分
-                weighted_score += 1.0 * weights.get("contract_tests", 0.35)
-                weight_sum += weights.get("contract_tests", 0.35)
-
-            # React DevTools
-            dt_score = layer_scores.get("react_devtools")
-            if dt_score is not None:
-                weighted_score += dt_score * weights.get("react_devtools", 0.15)
-                weight_sum += weights.get("react_devtools", 0.15)
-            else:
-                # 未运行 React DevTools → 视为通过（100%），避免拉低总分
-                weighted_score += 1.0 * weights.get("react_devtools", 0.15)
-                weight_sum += weights.get("react_devtools", 0.15)
-
-            # Browser tests: 来自 Reviewer
-            weighted_score += contract_rate * weights.get("browser_tests", 0.10)
-            weight_sum += weights.get("browser_tests", 0.10)
-
-            # 归一化（所有维度都已计入，无需特殊处理）
-            final_score = weighted_score / weight_sum if weight_sum > 0 else contract_rate
-
-            # 检查维度最低要求
-            tier = None
-            if current_group_id:
-                tier_num = int(''.join(filter(str.isdigit, current_group_id)))
-                if tier_num <= 4:
-                    tier = "tier1"
-                else:
-                    tier = "tier2"
-
-            # 维度最低要求检查已移除（DIMENSION_MINIMUMS 为空）
-            # 旧逻辑：即使总分达标，任一维度低于阈值也判定失败
-            # 新逻辑：总分达标即通过，避免单一维度波动导致整体失败
-            dimension_passed = True
-
-            # 使用聚合后的分数
-            old_contract_rate = contract_rate
-            contract_rate = final_score
-
-            self.log.info(
-                f"[weighted_score] {current_group_id}: "
-                f"code_review={old_contract_rate:.0%} × {weights.get('code_review', 0.40)} + "
-                f"contract_tests={ct_score:.0%} × {weights.get('contract_tests', 0.35)} + "
-                f"react_devtools={dt_score if dt_score is not None else 'N/A'} × {weights.get('react_devtools', 0.15)} + "
-                f"browser={old_contract_rate:.0%} × {weights.get('browser_tests', 0.10)} "
-                f"= {contract_rate:.0%}"
-            )
-            if not dimension_passed:
-                self.log.warning(f"[weighted_score] Dimension minimum NOT met — forcing FAIL")
-                contract_rate = min(contract_rate, 0.5)  # 强制降低分数
+        # Reviewer 已经综合了代码审查、浏览器测试、自动化测试的结果
+        # Harness 直接信任 Reviewer 的 GROUP_PASS_RATE 和 CRITICAL_BUG 标记
+        
+        # 记录 Reviewer 的判定结果
+        self.log.info(
+            f"[reviewer_result] {current_group_id}: "
+            f"rate={contract_rate:.0%}, "
+            f"critical_bug={has_critical_bug}"
+        )
 
         # ------------------------------------------------------------------ #
-        #  Update feature-group state (AFTER weighted scoring)
+        #  Update feature-group state (大组模式)
         # ------------------------------------------------------------------ #
         if self.feature_groups and self.feature_groups.current_group:
             gid = self.feature_groups.current_group_id
-            self.feature_groups.update_rate(gid, contract_rate)
+            self.feature_groups.update_rate(gid, contract_rate, has_critical_bug=has_critical_bug)
+            
             # Advance to next group if current group passed
             if self.feature_groups.check_should_advance():
                 advanced = self.feature_groups.advance()
@@ -998,17 +867,21 @@ class Harness:
                         f"[feature_groups] {gid} passed — advancing to "
                         f"{self.feature_groups.current_group_id}"
                     )
-            # Log tier status
-            ts = self.feature_groups.tier_status()
-            for tier, st in ts.items():
-                status = "✅" if st["passed"] else "⏳"
-                self.log.info(
-                    f"[tier] {tier}: {st['groups_complete']}/{st['groups_total']} "
-                    f"groups ({st['rate']:.0%}) {status}"
+            elif has_critical_bug:
+                self.log.warning(
+                    f"[feature_groups] {gid} has CRITICAL_BUG — "
+                    f"staying on current group for fix"
                 )
+            else:
+                self.log.info(
+                    f"[feature_groups] {gid} not passed ({contract_rate:.0%}) — "
+                    f"staying for another round"
+                )
+            
             self.log.info(
                 f"[overall] {self.feature_groups.overall_rate():.0%} "
-                f"({self.feature_groups.current_group_id} at {contract_rate:.0%})"
+                f"({self.feature_groups.current_group_id} at {contract_rate:.0%}, "
+                f"critical_bug={has_critical_bug})"
             )
 
         self.sprint_pass_rate_history.append(sprint_rate)
@@ -1085,22 +958,19 @@ class Harness:
 
         # Inject feature-group progress hint
         if self.feature_groups:
-            ts = self.feature_groups.tier_status()
-            tier_hint = "\n".join(
-                f"  {cfg['label']}: {ts[tier]['groups_complete']}/{ts[tier]['groups_total']} 组完成"
-                for tier, cfg in TIER_REQUIREMENTS.items() if tier in ts
-            )
-            task += f"\n功能组进度:\n{tier_hint}\n"
-            task += f"总体进度: {self.feature_groups.overall_rate():.0%}\n"
-            # 注入当前功能组的加权得分，让 Builder 知道真实状态
+            task += f"\n总体进度: {self.feature_groups.overall_rate():.0%}\n"
+            # 注入当前大组的状态
             current_gid = self.feature_groups.current_group_id
             current_rate = self.feature_groups.pass_rates.get(current_gid, 0.0)
-            threshold = _get_group_threshold(current_gid)
-            task += f"\n当前功能组 {current_gid} 加权得分: {current_rate:.0%} (通过阈值: {threshold:.0%})\n"
-            if current_rate < threshold:
-                task += f"注意: {current_gid} 尚未达标，请继续修复该功能组的未通过项。\n"
+            has_bug = self.feature_groups.critical_bugs.get(current_gid, False)
+            threshold = GROUP_PASS_THRESHOLD_DEFAULT
+            task += f"\n当前大组 {current_gid} 通过率: {current_rate:.0%} (通过阈值: {threshold:.0%})\n"
+            if has_bug:
+                task += f"⚠️ 当前大组有 CRITICAL_BUG，必须先修复才能进入下一个大组。\n"
+            elif current_rate < threshold:
+                task += f"注意: {current_gid} 尚未达标，请继续修复未通过项。\n"
             else:
-                task += f"注意: {current_gid} 已达标，可以推进到下一个功能组。\n"
+                task += f"注意: {current_gid} 已达标，可以推进到下一个大组。\n"
 
         # Inject the previous round's strategy decision
         if self.strategy_history:
@@ -1350,11 +1220,11 @@ class Harness:
             total_groups = len(self.feature_groups.group_ids)
             completed = sum(
                 1 for gid in self.feature_groups.group_ids
-                if self.feature_groups.pass_rates.get(gid, 0.0) >= _get_group_threshold(gid)
+                if self.feature_groups.check_group_passed(gid)
             )
             remaining = total_groups - completed
-            # 已跑轮数 + 剩余组数 + 2轮缓冲（给Reviewer测试和Bug修复留空间）
-            remaining_estimate = self._completed_rounds + remaining + 2
+            # 已跑轮数 + 剩余组数 × 2（每大组平均 2 轮）+ 2轮缓冲
+            remaining_estimate = self._completed_rounds + remaining * 2 + 2
 
         # 融合计算
         max_rounds = base + runtime_adjust + strategy_adjust
@@ -1380,24 +1250,31 @@ class Harness:
 
         spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
         
-        # 更精确的功能计数：统计 F1, F2, ... 格式的功能编号
+        # 更精确的功能计数：统计 Group N 或 F1, F2, ... 格式的功能编号
         import re
+        # 新格式: Group 1, Group 2, ...
+        group_matches = re.findall(r'Group\s+\d+[:：]', spec_text)
+        # 旧格式: F1, F2, ...
         feature_matches = re.findall(r'\*\*F\d+[:：]', spec_text)
+        
+        group_count = len(group_matches)
         feature_count = len(feature_matches)
         
-        # 统计 Phase 数量
-        phase_matches = re.findall(r'### Phase \d+', spec_text)
-        phase_count = len(phase_matches)
+        # 使用大组数量优先
+        if group_count > 0:
+            # 大组模式：每个大组约 1-3 轮（实现 + 修复）
+            rounds = group_count * 2  # 每个大组平均 2 轮
+        else:
+            # 旧格式：每 Phase 至少 1 轮 + 每个功能约 1 轮
+            phase_matches = re.findall(r'### Phase \d+', spec_text)
+            phase_count = len(phase_matches)
+            rounds = phase_count + feature_count
         
         # 统计图片资源需求
         asset_count = len(re.findall(r'generate_image|hero-gradient|theme-.*-preview|empty-state', spec_text))
-        
-        # 基础轮数：每 Phase 至少 1 轮骨架 + 每个功能约 1 轮
-        rounds = phase_count  # 每个 Phase 至少 1 轮
-        rounds += feature_count  # 每个功能约 1 轮
         rounds += asset_count // 3   # 图片生成每 3 张约 1 轮
         
-        # 保底：至少 4 轮（避免复杂项目被严重低估），但不超过硬上限
+        # 保底：至少 4 轮，但不超过硬上限
         return max(min(rounds, 10), 4)
 
     def _runtime_adjustment(self) -> int:
@@ -1665,7 +1542,7 @@ class Harness:
         self.dashboard.end_agent("success")
         
         # Parse Builder strategy
-        strategy = self._parse_strategy(build_result)
+        strategy = parse_strategy(build_result)
         self.strategy_history.append({"round": round_num, **strategy})
         
         # Pipeline: Build validation

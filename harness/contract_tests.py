@@ -59,52 +59,98 @@ class ContractTestSuite:
     # ------------------------------------------------------------------ #
     def parse_contract(self) -> list[ContractCriterion]:
         """解析 contract.md 提取可测试标准"""
+        logger.info(f"[contract_test] Looking for contract at: {self.contract_path}")
         if not self.contract_path.exists():
-            logger.warning("[contract_test] contract.md not found")
-            return []
+            logger.warning(f"[contract_test] contract.md not found at {self.contract_path}")
+            # 尝试在项目目录中查找
+            alt_path = self.project_path / "contract.md"
+            if alt_path.exists():
+                logger.info(f"[contract_test] Found contract at alternative path: {alt_path}")
+                self.contract_path = alt_path
+            else:
+                # 列出目录内容帮助诊断
+                try:
+                    files = list(self.project_path.iterdir())
+                    file_names = [f.name for f in files if f.is_file()]
+                    logger.warning(f"[contract_test] Files in {self.project_path}: {file_names}")
+                except Exception as e:
+                    logger.warning(f"[contract_test] Cannot list directory: {e}")
+                return []
 
         content = self.contract_path.read_text(encoding="utf-8", errors="replace")
         criteria = []
 
-        # 解析功能组标题: ### F1: 功能名称
-        group_pattern = re.compile(r'###\s*(F\d+)[:：]\s*(.+?)$', re.MULTILINE)
+        # 尝试新格式: ## Group 1: 大组名称
+        group_pattern = re.compile(r'^#{2}\s+Group\s+(\d+)[:：]\s*(.+?)$', re.MULTILINE | re.IGNORECASE)
         groups = list(group_pattern.finditer(content))
+        
+        if groups:
+            # 新格式 G1.A.1
+            for i, match in enumerate(groups):
+                group_num = match.group(1)
+                group_name = match.group(2).strip()
+                start = match.end()
+                end = groups[i + 1].start() if i + 1 < len(groups) else len(content)
+                section = content[start:end]
 
-        for i, match in enumerate(groups):
-            group_id = match.group(1)
-            group_name = match.group(2).strip()
-            start = match.end()
-            end = groups[i + 1].start() if i + 1 < len(groups) else len(content)
-            section = content[start:end]
+                # 解析该组下的标准项: - [ ] **G1.A.1** 描述
+                item_pattern = re.compile(
+                    r'^\s*-\s*\[\s*\]\s*\*\*(G\d+\.[A-Z]\.\d+)\*\*\s*(.+?)(?=\n|$)',
+                    re.MULTILINE
+                )
+                for item_match in item_pattern.finditer(section):
+                    cid = item_match.group(1)
+                    desc = item_match.group(2).strip()
+                    tier = self._infer_tier(group_num)
+                    testable = self._is_testable(desc)
+                    vtype = self._infer_validation_type(desc)
+                    criteria.append(ContractCriterion(
+                        id=cid, description=desc, tier=tier,
+                        group_id=f"G{group_num}", testable=testable,
+                        validation_type=vtype,
+                    ))
+        else:
+            # 回退到旧格式: ### F1: 功能名称
+            group_pattern = re.compile(r'###\s*(F\d+)[:：]\s*(.+?)$', re.MULTILINE)
+            groups = list(group_pattern.finditer(content))
 
-            # 解析该组下的标准项
-            item_pattern = re.compile(
-                r'-\s*\[\s*\]\s*\*\*(F\d+\.\d+)\*\*\s*(.+?)(?=\n|$)',
-                re.MULTILINE
-            )
-            for item_match in item_pattern.finditer(section):
-                cid = item_match.group(1)
-                desc = item_match.group(2).strip()
-                # 从描述推断 tier
-                tier = self._infer_tier(group_id)
-                testable = self._is_testable(desc)
-                vtype = self._infer_validation_type(desc)
-                criteria.append(ContractCriterion(
-                    id=cid, description=desc, tier=tier,
-                    group_id=group_id, testable=testable,
-                    validation_type=vtype,
-                ))
+            for i, match in enumerate(groups):
+                group_id = match.group(1)
+                group_name = match.group(2).strip()
+                start = match.end()
+                end = groups[i + 1].start() if i + 1 < len(groups) else len(content)
+                section = content[start:end]
+
+                # 解析该组下的标准项
+                item_pattern = re.compile(
+                    r'-\s*\[\s*\]\s*\*\*(F\d+\.\d+)\*\*\s*(.+?)(?=\n|$)',
+                    re.MULTILINE
+                )
+                for item_match in item_pattern.finditer(section):
+                    cid = item_match.group(1)
+                    desc = item_match.group(2).strip()
+                    tier = self._infer_tier(group_id)
+                    testable = self._is_testable(desc)
+                    vtype = self._infer_validation_type(desc)
+                    criteria.append(ContractCriterion(
+                        id=cid, description=desc, tier=tier,
+                        group_id=group_id, testable=testable,
+                        validation_type=vtype,
+                    ))
 
         self.criteria = criteria
         logger.info(f"[contract_test] Parsed {len(criteria)} criteria from contract.md")
         return criteria
 
-    def _infer_tier(self, group_id: str) -> int:
+    def _infer_tier(self, group_id: str | int) -> int:
         """从功能组 ID 推断 tier"""
-        num = int(re.search(r'\d+', group_id).group()) if re.search(r'\d+', group_id) else 1
-        if num <= 4:
+        if isinstance(group_id, int):
+            num = group_id
+        else:
+            num = int(re.search(r'\d+', group_id).group()) if re.search(r'\d+', group_id) else 1
+        if num <= 2:
             return 1
-        elif num <= 9:
+        elif num <= 3:
             return 2
         return 3
 

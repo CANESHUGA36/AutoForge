@@ -109,10 +109,15 @@ class TestRunWithStats:
         monkeypatch.setattr(config, "AGENT_ITERATION_LIMITS", {"builder": 10})
 
         from agents import Agent
+        # FIX: Must include run_bash in tools so env-fix detection can trigger
+        # (allowed_tools check rejects calls not in the agent's toolset)
+        builder_tools = [
+            {"type": "function", "function": {"name": "run_bash", "description": "Run bash"}},
+        ]
         builder = Agent(
             name="Builder",
             system_prompt="You are a builder.",
-            tools=[],
+            tools=builder_tools,
             logger=MagicMock(),
         )
 

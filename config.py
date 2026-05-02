@@ -51,46 +51,19 @@ SPRINT_PASS_RATE_THRESHOLD = float(os.environ.get("SPRINT_PASS_RATE_THRESHOLD", 
 CONTRACT_PASS_RATE_THRESHOLD = float(os.environ.get("CONTRACT_PASS_RATE_THRESHOLD", "0.75"))
 
 # ============================================================================
-# 分层验证体系权重与阈值（Validation Architecture v2）
+# 大组模式配置（Big Group Mode）
 # ============================================================================
-# 四层验证：代码审查 + 契约测试 + React DevTools + 浏览器测试
-# 总分 = Σ(维度得分 × 权重)，同时必须满足各维度最低要求
+# 大组模式下，Reviewer 自主决定测试策略，Harness 不做权重聚合。
+# 以下配置保留供 Reviewer 参考使用：
 
-EVALUATION_WEIGHTS: dict[str, float] = {
-    "code_review":   float(os.environ.get("WEIGHT_CODE_REVIEW",   "0.40")),
-    "contract_tests": float(os.environ.get("WEIGHT_CONTRACT_TESTS", "0.35")),
-    "react_devtools": float(os.environ.get("WEIGHT_REACT_DEVTOOLS", "0.15")),
-    "browser_tests":  float(os.environ.get("WEIGHT_BROWSER_TESTS",  "0.10")),
-}
+# 大组通过阈值（默认 70%）
+GROUP_PASS_THRESHOLD = float(os.environ.get("GROUP_PASS_THRESHOLD", "0.70"))
 
-# Next.js 项目特殊权重（SSR 降低浏览器测试权重）
-NEXTJS_EVALUATION_WEIGHTS: dict[str, float] = {
-    "code_review":    float(os.environ.get("WEIGHT_CODE_REVIEW",    "0.35")),
-    "contract_tests":  float(os.environ.get("WEIGHT_CONTRACT_TESTS",  "0.35")),
-    "react_devtools":  float(os.environ.get("WEIGHT_REACT_DEVTOOLS",  "0.15")),
-    "ssr_check":       float(os.environ.get("WEIGHT_SSR_CHECK",       "0.10")),
-    "browser_tests":   float(os.environ.get("WEIGHT_BROWSER_TESTS",   "0.05")),
-}
+# 全局通过阈值（所有大组完成后）
+OVERALL_PASS_THRESHOLD = float(os.environ.get("OVERALL_PASS_THRESHOLD", "0.75"))
 
-# 纯 HTML 项目权重（浏览器测试更可靠）
-HTML_EVALUATION_WEIGHTS: dict[str, float] = {
-    "code_review":    float(os.environ.get("WEIGHT_CODE_REVIEW",    "0.30")),
-    "contract_tests":  float(os.environ.get("WEIGHT_CONTRACT_TESTS",  "0.30")),
-    "browser_tests":   float(os.environ.get("WEIGHT_BROWSER_TESTS",   "0.40")),
-}
-
-# Tier 阈值 — 仅 tier1/tier2 两个功能层级
-# Functional 组按 50/50 分割：前一半 → tier1 (MVP)，后一半 → tier2 (Core)
-# D/T 组（Design/Technical）不纳入退出判定，不阻塞项目成功
-TIER_THRESHOLDS: dict[str, float] = {
-    "tier1": float(os.environ.get("THRESHOLD_TIER1", "0.80")),  # MVP: 80%（降低避免过度严苛）
-    "tier2": float(os.environ.get("THRESHOLD_TIER2", "0.70")),  # Core: 70%
-}
-
-# 维度最低要求已移除 —— 加权总分是唯一判定标准
-# 旧逻辑：即使总分达标，任一维度低于阈值也判定失败
-# 新逻辑：总分达标即通过，避免单一维度波动导致整体失败
-DIMENSION_MINIMUMS: dict[str, dict[str, float]] = {}
+# 旧权重配置已移除 —— Reviewer 自主测试，不做程序化权重聚合
+# 如果未来需要恢复权重模式，可从 git 历史恢复
 
 # 契约测试配置
 CONTRACT_TEST_ENABLED = os.environ.get("CONTRACT_TEST_ENABLED", "true").lower() == "true"
@@ -100,15 +73,7 @@ CONTRACT_TEST_SCORE_THRESHOLD = float(os.environ.get("CONTRACT_TEST_SCORE_THRESH
 REACT_DEVTOOLS_ENABLED = os.environ.get("REACT_DEVTOOLS_ENABLED", "true").lower() == "true"
 REACT_DEVTOOLS_SCORE_THRESHOLD = float(os.environ.get("REACT_DEVTOOLS_SCORE_THRESHOLD", "50.0"))
 
-# Per-dimension hard thresholds — if any dimension scores below its threshold,
-# the sprint is forced to fail regardless of the overall score.
-# Keys must match the canonical names returned by Harness._parse_dimension_scores().
-DIMENSION_THRESHOLDS: dict = {
-    "functionality":  float(os.environ.get("THRESHOLD_FUNCTIONALITY",  "5.0")),
-    "design_quality": float(os.environ.get("THRESHOLD_DESIGN_QUALITY", "4.0")),
-    "originality":    float(os.environ.get("THRESHOLD_ORIGINALITY",    "3.0")),
-    "craft":          float(os.environ.get("THRESHOLD_CRAFT",          "3.0")),
-}
+# 旧维度阈值已移除 —— 大组模式下使用 GROUP_PASS_THRESHOLD 和 OVERALL_PASS_THRESHOLD
 
 # Agent 限制
 MAX_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "50"))
@@ -119,12 +84,11 @@ MAX_TOOL_ERRORS = 5
 AGENT_ITERATION_LIMITS = {
     "architect": int(os.environ.get("MAX_ITERATIONS_ARCHITECT", "30")),
     "sprint_master": int(os.environ.get("MAX_ITERATIONS_SPRINT_MASTER", "15")),
-    # FIX: Increase Builder budget for first round (complex project setup)
-    "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "60")),
-    # FIX: Increase Reviewer budget when Builder hits limits
+    # 大组模式：每个大组包含更多功能，Builder 需要更多迭代
+    "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "80")),
+    # Reviewer 自主测试，需要足够预算完成深度验证
     "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "50")),
-    # FIX: Increase Judge budget for thorough evaluation
-    "judge": int(os.environ.get("MAX_ITERATIONS_JUDGE", "15")),
+    # Judge 已移除 —— 大组模式下 Reviewer 直接给出判定
 }
 
 # 路径
