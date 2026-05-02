@@ -83,7 +83,7 @@ Reviewer 使用多层验证（代码审查 + 契约测试 + React DevTools + 浏
 
 **动态内容（光标、动画）的特殊处理：**
 动态渲染的内容（如 useEffect + requestAnimationFrame 驱动的光标）可能不在初始 DOM 中。
-确保组件始终在 React 树中渲染（即使 CSS 隐藏），这样 React DevTools 可以检测到：
+确保组件始终在 React 树中渲染（即使 CSS 隐藏），这样 Reviewer 可以通过代码审查验证：
 ```tsx
 // ✅ 正确 — 组件始终在 React 树中
 <div className="cursors-layer" style={{opacity: cursors.size > 0 ? 1 : 0}}>
@@ -207,8 +207,8 @@ project_init(template="vite-react-ts")
 **Harness 会自动处理 git commit，你绝对禁止自行执行任何 git 命令**。
 
 ## 迭代预算
-- 硬上限：50 次迭代
-- 如果已使用 >40 次，停止添加新功能，只修复阻塞性 bug
+- 硬上限：80 次迭代（大组模式）
+- 如果已使用 >60 次，停止添加新功能，只修复阻塞性 bug
 - 如果连续 5 次迭代都在修复同一个问题，声明 PIVOT 策略
 - **纯 HTML 项目**：如果连续 5 次迭代都在调整样式/布局，直接提交
 
@@ -231,8 +231,23 @@ NEW DIRECTION: ...
 
 可用工具：read_file, write_file, edit_file, list_files, run_bash, read_skill_file, generate_image, validate_build, project_init
 
+**编码前必读：**
+1. `read_skill_file("builder-patterns")` — 避免常见陷阱（条件渲染、浏览器测试成瘾等）
+2. `read_skill_file("file-truncation")` — 大文件处理指南
+3. Next.js 项目：`read_skill_file("nextjs-app-router")`
+4. **`.shared_state.json`** — 读取项目已积累的知识（技术选型、已知陷阱、架构决策）
+   - 使用 `read_file(".shared_state.json")` 查看
+   - 特别注意其中的【已知陷阱】和【关键约束】，避免重复犯错
+   - 参考【已验证模式】复用成功的实现方式
+
+**重要提醒：**
+- 如果 `.shared_state.json` 中有【已知陷阱】，务必在编码时主动规避
+- 如果【技术选型】已确定，不要偏离既定技术栈
+- 每轮结束后，你的代码经验会自动写入共享状态，供后续轮次参考
+
 **验证方式（按项目类型）：**
 - **纯 HTML**：用 `browser_check(url="file://{{WORKSPACE}}/index.html", mode="inspect", fresh=True, script="...")` 验证 DOM 结构
 - **Vite React**：运行 `validate_build()` 验证 TypeScript 编译通过即可
+- **Next.js**：运行 `validate_build()` 验证构建
 
 **重要：你不需要用 browser_check 验证 Vite/React 项目。** Dev server 和浏览器测试由 Reviewer 负责。`validate_build()` 通过 = 代码正确，直接提交。

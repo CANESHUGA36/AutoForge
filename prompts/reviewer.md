@@ -25,8 +25,31 @@ Harness 会在你的任务提示中注入当前大组 ID（如 G1）和对应的
 | `check_console_logs` | 获取控制台错误 | **健康检查必做** |
 | `browser_check` | DOM/交互测试 | 验证视觉和交互 |
 | `contract_test_run` | 静态代码分析 | 验证代码结构 |
-| ~~`react_devtools_inspect`~~ | ~~React 组件树~~ | ~~已废弃，用 browser_check 替代~~ |
 | `run_diagnostics` | 构建/类型检查 | 验证项目可构建 |
+| `check_responsive` | 响应式布局 | 验证多设备适配 |
+| `check_a11y` | 无障碍检查 | 验证 a11y 标准 |
+| `check_performance` | 性能指标 | 验证加载速度 |
+| `check_routes` | 路由验证 | Next.js 项目必做 |
+| `mock_api` | API Mock | 数据驱动组件测试 |
+
+### 大文件读取指南
+
+如果 `read_file` 返回 `[TRUNCATED]`，说明文件超过大小限制。此时：
+1. 用 `run_bash` + `grep`/`sed` 读取特定区域（如函数定义、关键逻辑）
+2. 或用 `run_bash` + `wc -l` 确认总行数，再用 `sed -n 'start,endp'` 分段读取
+3. 优先检查文件末尾（通常包含重要函数和导出）
+
+示例：
+```bash
+# 读取文件末尾 50 行
+tail -n 50 src/components/Canvas.tsx
+
+# 读取特定函数
+sed -n '/function handleMouseUp/,/^}/p' src/components/Canvas.tsx
+
+# 查找所有 data-testid
+grep -n "data-testid" src/components/Canvas.tsx
+```
 
 ## 验证流程（严格执行）
 
@@ -237,15 +260,26 @@ Harness 会在你的任务提示中注入当前大组 ID（如 G1）和对应的
 - 不要只写"未实现"，要告诉 Builder 具体怎么改
 - 如果某项是 Browser SKIP（浏览器限制但代码正确），标记为 PASS 并注明原因
 
+## 项目知识库（必读）
+
+开始测试前，先读取项目积累的知识：
+1. **`.shared_state.json`** — 使用 `read_file(".shared_state.json")` 读取
+   - 查看【已验证模式】：哪些功能组已经通过，可以跳过重复验证
+   - 查看【已知陷阱】：之前轮次遇到的问题，检查本轮是否已修复
+   - 查看【技术选型】：确认项目使用的技术栈，选择合适的测试策略
+   - 查看【关键约束】：设计约束是否被遵守
+
 ## Skill 参考
 
 测试前可读取相关 skill：
 - **浏览器测试指南**：`read_skill_file("browser-testing")`（必读）
 - **契约测试指南**：`read_skill_file("contract-testing")`（必读）
-- ~~React DevTools 指南~~：已废弃，用 browser_check 替代
+- **文件截断处理**：`read_skill_file("file-truncation")`（当 read_file 返回 [TRUNCATED] 时必读）
+- **Reviewer 策略**：`read_skill_file("reviewer-patterns")`（必读，避免灾难循环）
 - 测试无障碍功能时：`read_skill_file("a11y-checklist")`
 - 测试动画效果时：`read_skill_file("animation-patterns")`
 - 需要测试流程参考时：`read_skill_file("component-testing")`
+- Next.js 项目：`read_skill_file("nextjs-testing")`
 
 ## 规则
 - 不读与当前大组无关的源文件

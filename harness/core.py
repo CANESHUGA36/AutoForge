@@ -31,6 +31,7 @@ from harness.feature_groups import (
 from harness.logging import setup_file_logging, log_round_stats, log_final_stats
 from harness.sprint import plan_sprint_master
 from harness.state import StateManager
+from harness.shared_state import SharedState, load_shared_state, save_shared_state
 from harness.strategy import parse_strategy
 from harness.events import EventBus
 from harness.pipeline import PipelineRunner
@@ -60,6 +61,8 @@ class Harness:
         self.state_mgr = StateManager(self.workspace)
         self.git.init_repo()
         setup_file_logging(self.workspace, self.log)
+        # 加载共享状态
+        self.shared_state = load_shared_state(str(self.workspace))
         #     Agent（按职能细分工具集）
         CORE_TOOLS = {"read_file", "write_file", "read_skill_file"}
         FILE_TOOLS = {"edit_file", "list_files"}
@@ -71,14 +74,17 @@ class Harness:
         architect_tools = CORE_TOOLS | GEN_TOOLS | {"search_web"}
         sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
         builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS
-        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"contract_test_run", "react_devtools_inspect", "check_console_logs", "detect_framework", "run_diagnostics"}
+        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"contract_test_run", "react_devtools_inspect", "check_console_logs", "detect_framework", "run_diagnostics", "check_responsive", "check_a11y", "check_performance", "check_routes", "mock_api"}
         judge_tools = CORE_TOOLS | {"read_file", "write_file", "read_skill_file"}
 
-        self.architect = Agent("Architect", ARCHITECT_SYSTEM, TOOL_SCHEMAS, allowed_tools=architect_tools, logger=self.log)
-        self.sprint_master = Agent("SprintMaster", SPRINT_MASTER_SYSTEM, TOOL_SCHEMAS, allowed_tools=sprint_master_tools, logger=self.log)
-        self.builder = Agent("Builder", BUILDER_SYSTEM, TOOL_SCHEMAS, use_state=True, allowed_tools=builder_tools, logger=self.log)
-        self.reviewer = Agent("Reviewer", REVIEWER_SYSTEM, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, allowed_tools=reviewer_tools, logger=self.log)
-        self.judge = Agent("Judge", JUDGE_SYSTEM, TOOL_SCHEMAS, allowed_tools=judge_tools, logger=self.log)
+        # 注入共享状态到 system prompts
+        self._inject_shared_state_into_prompts()
+        
+        self.architect = Agent("Architect", self.architect_prompt, TOOL_SCHEMAS, allowed_tools=architect_tools, logger=self.log)
+        self.sprint_master = Agent("SprintMaster", self.sprint_master_prompt, TOOL_SCHEMAS, use_state=True, allowed_tools=sprint_master_tools, logger=self.log)
+        self.builder = Agent("Builder", self.builder_prompt, TOOL_SCHEMAS, use_state=True, allowed_tools=builder_tools, logger=self.log)
+        self.reviewer = Agent("Reviewer", self.reviewer_prompt, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, use_state=True, allowed_tools=reviewer_tools, logger=self.log)
+        self.judge = Agent("Judge", self.judge_prompt, TOOL_SCHEMAS, allowed_tools=judge_tools, logger=self.log)
         self.score_history: list[float] = []
         self.sprint_score_history: list[float] = []
         self.overall_score_history: list[float] = []
@@ -98,6 +104,41 @@ class Harness:
         # Feature-group state machine (populated on first _build_round)
         self.feature_groups: FeatureGroupState | None = None
         self._load_state()
+    
+    def _inject_shared_state_into_prompts(self) -> None:
+        """将共享状态注入到各 Agent 的 system prompt 中
+        
+        注入位置：放在 system prompt 末尾，用显式分隔线包裹，
+        确保 Agent 在每次对话开始时都能看到。
+        """
+        current_round = self._completed_rounds if hasattr(self, '_completed_rounds') else 0
+        
+        # Convert _PromptProxy to str first
+        self.architect_prompt = str(ARCHITECT_SYSTEM)
+        self.sprint_master_prompt = str(SPRINT_MASTER_SYSTEM)
+        self.builder_prompt = str(BUILDER_SYSTEM)
+        self.reviewer_prompt = str(REVIEWER_SYSTEM)
+        self.judge_prompt = str(JUDGE_SYSTEM)
+        
+        # 如果有共享状态，注入到 prompts
+        if hasattr(self, 'shared_state') and self.shared_state:
+            # Builder: 需要架构决策、已知陷阱、已验证模式
+            shared_section = self.shared_state.to_prompt_section("Builder", current_round)
+            if shared_section:
+                self.builder_prompt += f"\n\n{shared_section}"
+                self.log.info(f"[shared_state] Injected {len(shared_section)} chars into Builder prompt")
+            
+            # Reviewer: 需要验证捷径、项目类型
+            shared_section = self.shared_state.to_prompt_section("Reviewer", current_round)
+            if shared_section:
+                self.reviewer_prompt += f"\n\n{shared_section}"
+                self.log.info(f"[shared_state] Injected {len(shared_section)} chars into Reviewer prompt")
+            
+            # SprintMaster: 需要架构决策、当前组信息
+            shared_section = self.shared_state.to_prompt_section("SprintMaster", current_round)
+            if shared_section:
+                self.sprint_master_prompt += f"\n\n{shared_section}"
+                self.log.info(f"[shared_state] Injected {len(shared_section)} chars into SprintMaster prompt")
     # ------------------------------------------------------------------ #
     #              ?StateManager ?                                  #
     # ------------------------------------------------------------------ #
@@ -210,6 +251,14 @@ class Harness:
                 self.log.error("Architect failed to create contract.md")
                 return {"success": False, "error": "Architect failed to create contract", "rounds": 0, "score": 0}
             self.log.info("Spec and contract created successfully")
+            
+            # Extract tech stack from spec for shared state
+            try:
+                spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
+                self._extract_tech_stack_from_spec(spec_text)
+            except Exception as e:
+                self.log.debug(f"[shared_state] Failed to extract tech stack: {e}")
+        
         # Phase 2+: Build-Evaluate loop
         self.dashboard.start_run()
         start_round = self._completed_rounds + 1
@@ -918,6 +967,11 @@ class Harness:
             f"tokens: {round_prompt}p+{round_completion}c | "
             f"total: {self.token_totals['prompt']}p+{self.token_totals['completion']}c"
         )
+        
+        # Update shared state with round findings
+        self._update_shared_state_after_round(
+            round_num, contract_rate, has_critical_bug, current_group_id
+        )
 
         # FIX: Close browser sessions after each round to prevent Chrome process accumulation
         try:
@@ -928,6 +982,176 @@ class Harness:
             self.log.debug(f"[browser_cleanup] Cleanup skipped: {e}")
 
         return {"sprint_rate": sprint_rate, "contract_rate": contract_rate, "score": contract_rate}
+
+    def _update_shared_state_after_round(
+        self, round_num: int, contract_rate: float, has_critical_bug: bool, group_id: str | None
+    ) -> None:
+        """每轮结束后更新共享状态"""
+        if not hasattr(self, 'shared_state') or self.shared_state is None:
+            return
+        
+        # Update basic info
+        self.shared_state.total_rounds = round_num
+        self.shared_state.current_group = group_id or ""
+        
+        # Extract pitfalls from feedback
+        feedback_path = self.workspace / config.FEEDBACK_FILE
+        if feedback_path.exists():
+            try:
+                feedback_text = feedback_path.read_text(encoding="utf-8", errors="replace")
+                # Extract failed criteria as pitfalls
+                if "Failed" in feedback_text or "FAIL" in feedback_text:
+                    # Look for CRITICAL_BUG description
+                    if has_critical_bug:
+                        bug_match = re.search(r'CRITICAL_BUG[:：]\s*(.+?)(?:\n|$)', feedback_text, re.IGNORECASE)
+                        if bug_match:
+                            bug_desc = bug_match.group(1).strip()
+                            # Extract solution from feedback if available
+                            solution_match = re.search(r'修复[建议|方案]?:\s*(.+?)(?:\n|$)', feedback_text)
+                            solution = solution_match.group(1).strip() if solution_match else "See feedback.md"
+                            self.shared_state.add_pitfall(
+                                pitfall=bug_desc,
+                                solution=solution,
+                                round=round_num,
+                                agent="Reviewer",
+                            )
+                
+                # Extract verification shortcuts
+                if contract_rate >= 0.9:
+                    self.shared_state.add_verified_pattern(
+                        pattern=f"{group_id} implementation",
+                        context=f"Round {round_num}",
+                        result="PASS",
+                    )
+                    
+            except Exception as e:
+                self.log.debug(f"[shared_state] Failed to extract from feedback: {e}")
+        
+        # Save shared state
+        try:
+            self.shared_state.save(str(self.workspace))
+            self.log.debug(f"[shared_state] Saved after round {round_num}")
+        except Exception as e:
+            self.log.debug(f"[shared_state] Save failed: {e}")
+
+    def _extract_tech_stack_from_spec(self, spec_text: str) -> None:
+        """从 spec.md 提取技术选型到共享状态
+        
+        支持多种格式：
+        - Markdown 表格: | Framework | React |
+        - 列表项: - Framework: React
+        - 标题: ## Tech Stack\n- React
+        - 行内: Framework: React
+        """
+        if not hasattr(self, 'shared_state') or self.shared_state is None:
+            return
+        
+        import re
+        
+        # === 1. 提取技术栈（多格式支持）===
+        tech_patterns = {
+            "framework": [
+                r'(?:Framework|前端框架|框架)[\s:：]\s*([^\n|]+?)(?:\n|\||$)',
+                r'\|\s*(?:Framework|框架)\s*\|\s*([^|]+?)\s*\|',
+                r'[-*]\s*(?:Framework|框架)[\s:：]\s*([^\n]+?)(?:\n|$)',
+            ],
+            "state_management": [
+                r'(?:State Management|状态管理)[\s:：]\s*([^\n|]+?)(?:\n|\||$)',
+                r'\|\s*(?:State|状态管理)\s*\|\s*([^|]+?)\s*\|',
+                r'[-*]\s*(?:State|状态管理)[\s:：]\s*([^\n]+?)(?:\n|$)',
+            ],
+            "styling": [
+                r'(?:Styling|样式|CSS)[\s:：]\s*([^\n|]+?)(?:\n|\||$)',
+                r'\|\s*(?:Styling|样式)\s*\|\s*([^|]+?)\s*\|',
+                r'[-*]\s*(?:Styling|样式)[\s:：]\s*([^\n]+?)(?:\n|$)',
+            ],
+            "build_tool": [
+                r'(?:Build Tool|构建工具|Bundler)[\s:：]\s*([^\n|]+?)(?:\n|\||$)',
+                r'\|\s*(?:Build|构建)\s*\|\s*([^|]+?)\s*\|',
+                r'[-*]\s*(?:Build|构建工具)[\s:：]\s*([^\n]+?)(?:\n|$)',
+            ],
+            "language": [
+                r'(?:Language|语言)[\s:：]\s*([^\n|]+?)(?:\n|\||$)',
+                r'\|\s*(?:Language|语言)\s*\|\s*([^|]+?)\s*\|',
+                r'[-*]\s*(?:Language|语言)[\s:：]\s*([^\n]+?)(?:\n|$)',
+            ],
+        }
+        
+        for key, patterns in tech_patterns.items():
+            for pattern in patterns:
+                match = re.search(pattern, spec_text, re.IGNORECASE)
+                if match:
+                    value = match.group(1).strip()
+                    # 清理 Markdown 格式
+                    value = re.sub(r'\*\*|\*|`|\[|\]', '', value)
+                    if value and len(value) < 100:
+                        self.shared_state.tech_stack[key] = value
+                        break  # 找到第一个匹配就停止
+        
+        # === 2. 从 Tech Stack 表格中提取（常见格式）===
+        # | 类别 | 技术 |
+        # |------|------|
+        # | Framework | React |
+        table_pattern = r'\|\s*(?:Tech|技术|类别|Type)\s*\|\s*(?:选择|技术|Technology|Value)\s*\|[\s\n\-]+((?:\|[^\n]+\|\n?)+)'
+        table_match = re.search(table_pattern, spec_text, re.IGNORECASE)
+        if table_match:
+            table_content = table_match.group(1)
+            for line in table_content.split('\n'):
+                cells = [c.strip() for c in line.split('|') if c.strip()]
+                if len(cells) >= 2:
+                    key_map = {
+                        'framework': 'framework',
+                        '前端框架': 'framework',
+                        'state': 'state_management',
+                        '状态管理': 'state_management',
+                        'styling': 'styling',
+                        '样式': 'styling',
+                        'css': 'styling',
+                        'build': 'build_tool',
+                        '构建': 'build_tool',
+                        'bundler': 'build_tool',
+                        'language': 'language',
+                        '语言': 'language',
+                    }
+                    key_lower = cells[0].lower()
+                    mapped_key = None
+                    for k, v in key_map.items():
+                        if k in key_lower:
+                            mapped_key = v
+                            break
+                    if mapped_key:
+                        self.shared_state.tech_stack[mapped_key] = cells[1]
+        
+        # === 3. 提取约束（多格式支持）===
+        constraint_patterns = [
+            r'(?:Constraint|约束|必须|Must)[\s:：]\s*([^\n]+?)(?:\n|$)',
+            r'[-*]\s*(?:Constraint|约束)[\s:：]\s*([^\n]+?)(?:\n|$)',
+            r'\|\s*(?:Constraint|约束)\s*\|\s*([^|]+?)\s*\|',
+        ]
+        for pattern in constraint_patterns:
+            for match in re.finditer(pattern, spec_text, re.IGNORECASE):
+                constraint = match.group(1).strip()
+                # 过滤掉太短的和已存在的
+                if len(constraint) > 10 and len(constraint) < 200 and constraint not in self.shared_state.constraints:
+                    self.shared_state.constraints.append(constraint)
+        
+        # 去重并限制数量
+        self.shared_state.constraints = list(dict.fromkeys(self.shared_state.constraints))[-15:]
+        
+        # === 4. 提取颜色/设计约束（特殊处理）===
+        color_pattern = r'(?:Color|颜色|Palette|配色)[\s:：]\s*([^\n]+?)(?:\n|$)'
+        for match in re.finditer(color_pattern, spec_text, re.IGNORECASE):
+            color = match.group(1).strip()
+            if color and color not in self.shared_state.constraints:
+                self.shared_state.constraints.append(f"Color: {color}")
+        
+        # === 5. 保存 ===
+        try:
+            self.shared_state.save(str(self.workspace))
+            self.log.info(f"[shared_state] Extracted tech_stack: {self.shared_state.tech_stack}")
+            self.log.info(f"[shared_state] Extracted {len(self.shared_state.constraints)} constraints")
+        except Exception:
+            pass
 
     def _build_build_task(self, round_num: int, rollback_msg: str) -> str:
         """Build the task prompt for the Builder agent."""
