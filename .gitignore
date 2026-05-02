@@ -88,3 +88,8 @@ _screenshot_*.png
 
 # Test directories
 test-playwright-click/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/

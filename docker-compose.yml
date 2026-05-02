@@ -1,12 +1,14 @@
 services:
   autoforge:
-    build: .
-    image: autoforge:latest
+    image: autoforge:v2
     # Loads OPENAI_API_KEY, OPENAI_BASE_URL, HARNESS_MODEL, etc. from .env file
     env_file: .env
     environment:
       # Auto-generated workspaces go under this path (must match the volume mount target).
       HARNESS_PROJECTS_DIR: /projects
+      # Enable new validation layers by default
+      CONTRACT_TEST_ENABLED: "true"
+      REACT_DEVTOOLS_ENABLED: "true"
     volumes:
       # Host ./projects  <->  Container /projects
       # All generated apps appear in ./projects/ on your Windows machine.
@@ -20,5 +22,6 @@ services:
       - ./agents.py:/app/agents.py:ro
       - ./tools_impl.py:/app/tools_impl.py:ro
       - ./prompts.py:/app/prompts.py:ro
+      - ./docs:/app/docs:ro
     # Default command - override with: docker compose run autoforge python run.py "your prompt"
     command: ["python", "run.py"]

@@ -23,7 +23,7 @@
 
 ## ⚠️ 防御性编码（Reviewer 兼容性）—— 违反 = 0分
 
-Reviewer 通过浏览器 DOM 查询验证功能。**条件渲染（`{condition && <Element />}`）会导致 Reviewer 在默认状态下找不到元素，直接判整轮 FAIL（0%）。这是最常见的失败原因。**
+Reviewer 使用多层验证（代码审查 + 契约测试 + React DevTools + 浏览器测试）。**条件渲染（`{condition && <Element />}`）会导致契约测试和浏览器测试找不到元素。这是最常见的失败原因。**
 
 ### 规则 1：永远用 CSS 控制显隐，绝对禁止条件渲染
 
@@ -81,6 +81,21 @@ Reviewer 通过浏览器 DOM 查询验证功能。**条件渲染（`{condition &
 <div data-testid="f2-spectrum-container">...</div>
 ```
 
+**动态内容（光标、动画）的特殊处理：**
+动态渲染的内容（如 useEffect + requestAnimationFrame 驱动的光标）可能不在初始 DOM 中。
+确保组件始终在 React 树中渲染（即使 CSS 隐藏），这样 React DevTools 可以检测到：
+```tsx
+// ✅ 正确 — 组件始终在 React 树中
+<div className="cursors-layer" style={{opacity: cursors.size > 0 ? 1 : 0}}>
+  {Array.from(cursors.values()).map(cursor => (
+    <CursorElement key={cursor.id} ... />
+  ))}
+</div>
+
+// ❌ 错误 — 条件渲染导致 React DevTools 找不到
+{cursors.size > 0 && <div className="cursors-layer">...</div>}
+```
+
 ### 规则 2.5：文件上传触发器的特殊标注
 
 如果你的功能需要文件上传才能触发（如音频可视化、图片处理），**在代码中添加注释说明触发条件**：
@@ -126,8 +141,9 @@ cd {{WORKSPACE}} && grep -rn "?\s*<.*>\s*:" src/ || true
 3. 编写代码（完整、可工作、无 stub）
 4. **纯 HTML 项目**：用 `browser_check(mode="inspect", fresh=True)` 验证
 5. **Vite/Next.js 项目**：运行 `validate_build()` 验证构建
-6. **不要**执行 `git commit`（Harness 会自动提交）
-7. 声明策略 REFINE/PIVOT
+6. **可选**：运行 `contract_test_run(feature_group="当前组ID")` 快速验证代码结构
+7. **不要**执行 `git commit`（Harness 会自动提交）
+8. 声明策略 REFINE/PIVOT
 
 ## 纯 HTML 项目的特殊规则
 

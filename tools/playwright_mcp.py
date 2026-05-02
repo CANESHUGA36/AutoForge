@@ -732,6 +732,12 @@ async def _browser_check_async(
     except Exception as e:
         result["error"] = str(e)
         log.error(f"[browser_check] Error: {e}")
+    finally:
+        # FIX: Always close the session to prevent Chrome process accumulation
+        try:
+            await session.close()
+        except Exception:
+            pass
 
     # 返回格式
     if format == "text":
@@ -1021,7 +1027,25 @@ def _format_result_as_text(result: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. 生命周期管理（Round 开始/结束）
+# 8. _get_page — 获取当前 Playwright Page（供 React DevTools 等复用）
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _get_page():
+    """获取当前活动的 Playwright Page 对象。
+    
+    如果没有可用会话，会自动创建一个新的浏览器会话并导航到默认 URL。
+    供 React DevTools 检查器等需要直接操作 Page 的组件使用。
+    
+    Returns:
+        BrowserSession: 带有 _session (MCP ClientSession) 和 execute_script 等方法的会话对象
+    """
+    pool = BrowserSessionPool()
+    session = await pool.get_session()
+    return session
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. 生命周期管理（Round 开始/结束）
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def close_all_sessions() -> None:

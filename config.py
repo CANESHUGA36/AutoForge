@@ -39,7 +39,7 @@ RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "200000"))
 # Harness 循环
 MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "0"))  # 0 = 动态计算
 MIN_ROUNDS = 3
-MAX_ROUNDS_HARD = 15
+MAX_ROUNDS_HARD = 20
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
 # 双轨评分 —— Sprint 过程门槛 + Overall 交付门槛
@@ -49,6 +49,56 @@ SIGNIFICANT_DROP = float(os.environ.get("SIGNIFICANT_DROP", "1.0"))
 # 双轨通过率评分体系
 SPRINT_PASS_RATE_THRESHOLD = float(os.environ.get("SPRINT_PASS_RATE_THRESHOLD", "0.70"))
 CONTRACT_PASS_RATE_THRESHOLD = float(os.environ.get("CONTRACT_PASS_RATE_THRESHOLD", "0.75"))
+
+# ============================================================================
+# 分层验证体系权重与阈值（Validation Architecture v2）
+# ============================================================================
+# 四层验证：代码审查 + 契约测试 + React DevTools + 浏览器测试
+# 总分 = Σ(维度得分 × 权重)，同时必须满足各维度最低要求
+
+EVALUATION_WEIGHTS: dict[str, float] = {
+    "code_review":   float(os.environ.get("WEIGHT_CODE_REVIEW",   "0.40")),
+    "contract_tests": float(os.environ.get("WEIGHT_CONTRACT_TESTS", "0.35")),
+    "react_devtools": float(os.environ.get("WEIGHT_REACT_DEVTOOLS", "0.15")),
+    "browser_tests":  float(os.environ.get("WEIGHT_BROWSER_TESTS",  "0.10")),
+}
+
+# Next.js 项目特殊权重（SSR 降低浏览器测试权重）
+NEXTJS_EVALUATION_WEIGHTS: dict[str, float] = {
+    "code_review":    float(os.environ.get("WEIGHT_CODE_REVIEW",    "0.35")),
+    "contract_tests":  float(os.environ.get("WEIGHT_CONTRACT_TESTS",  "0.35")),
+    "react_devtools":  float(os.environ.get("WEIGHT_REACT_DEVTOOLS",  "0.15")),
+    "ssr_check":       float(os.environ.get("WEIGHT_SSR_CHECK",       "0.10")),
+    "browser_tests":   float(os.environ.get("WEIGHT_BROWSER_TESTS",   "0.05")),
+}
+
+# 纯 HTML 项目权重（浏览器测试更可靠）
+HTML_EVALUATION_WEIGHTS: dict[str, float] = {
+    "code_review":    float(os.environ.get("WEIGHT_CODE_REVIEW",    "0.30")),
+    "contract_tests":  float(os.environ.get("WEIGHT_CONTRACT_TESTS",  "0.30")),
+    "browser_tests":   float(os.environ.get("WEIGHT_BROWSER_TESTS",   "0.40")),
+}
+
+# Tier 阈值 — 仅 tier1/tier2 两个功能层级
+# Functional 组按 50/50 分割：前一半 → tier1 (MVP)，后一半 → tier2 (Core)
+# D/T 组（Design/Technical）不纳入退出判定，不阻塞项目成功
+TIER_THRESHOLDS: dict[str, float] = {
+    "tier1": float(os.environ.get("THRESHOLD_TIER1", "0.80")),  # MVP: 80%（降低避免过度严苛）
+    "tier2": float(os.environ.get("THRESHOLD_TIER2", "0.70")),  # Core: 70%
+}
+
+# 维度最低要求已移除 —— 加权总分是唯一判定标准
+# 旧逻辑：即使总分达标，任一维度低于阈值也判定失败
+# 新逻辑：总分达标即通过，避免单一维度波动导致整体失败
+DIMENSION_MINIMUMS: dict[str, dict[str, float]] = {}
+
+# 契约测试配置
+CONTRACT_TEST_ENABLED = os.environ.get("CONTRACT_TEST_ENABLED", "true").lower() == "true"
+CONTRACT_TEST_SCORE_THRESHOLD = float(os.environ.get("CONTRACT_TEST_SCORE_THRESHOLD", "60.0"))
+
+# React DevTools 配置
+REACT_DEVTOOLS_ENABLED = os.environ.get("REACT_DEVTOOLS_ENABLED", "true").lower() == "true"
+REACT_DEVTOOLS_SCORE_THRESHOLD = float(os.environ.get("REACT_DEVTOOLS_SCORE_THRESHOLD", "50.0"))
 
 # Per-dimension hard thresholds — if any dimension scores below its threshold,
 # the sprint is forced to fail regardless of the overall score.

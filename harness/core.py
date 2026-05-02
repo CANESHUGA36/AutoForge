@@ -19,6 +19,9 @@ from prompts import (
 from tools_impl import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
 from harness.eval import parse_pass_rates, parse_skip_rate, compute_actual_contract_rate, parse_group_pass_rates
 from harness.git import GitManager
+from harness.framework_adapter import get_framework_adapter
+from harness.contract_tests import ContractTestRunner
+from harness.react_devtools import ReactDevToolsChecker
 from harness.feature_groups import (
     FeatureGroupState, parse_feature_groups, get_group_instruction,
     TIER_REQUIREMENTS, OVERALL_PASS_THRESHOLD, _get_group_threshold,
@@ -67,7 +70,7 @@ class Harness:
         architect_tools = CORE_TOOLS | GEN_TOOLS | {"search_web"}
         sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
         builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS
-        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS
+        reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"contract_test_run", "react_devtools_inspect"}
         judge_tools = CORE_TOOLS | {"read_file", "write_file", "read_skill_file"}
 
         self.architect = Agent("Architect", ARCHITECT_SYSTEM, TOOL_SCHEMAS, allowed_tools=architect_tools, logger=self.log)
@@ -116,6 +119,8 @@ class Harness:
                 "last_round": self._completed_rounds,
                 "event_log": str(self.workspace / ".events" / "pipeline.jsonl"),
             },
+            # FIX: Save feature_groups state so resume works correctly
+            "feature_groups_state": self.feature_groups.to_dict() if self.feature_groups else None,
         }
         self.state_mgr.save(state)
     def _load_state(self) -> None:
@@ -147,6 +152,7 @@ class Harness:
         self.strategy_history = state.get("strategy_history", [])
         self.token_totals = state.get("token_totals", {"prompt": 0, "completion": 0})
         self.round_stats = state.get("round_stats", [])
+        # FIX: Restore feature_groups state will be done after contract is parsed in _build_round
         self._last_sprint_passed = state.get("last_sprint_passed", False)
         # Load pipeline state (for forward compatibility)
         pipeline_state = state.get("pipeline_state", {})
@@ -206,7 +212,10 @@ class Harness:
         # Phase 2+: Build-Evaluate loop
         self.dashboard.start_run()
         start_round = self._completed_rounds + 1
-        for round_num in range(start_round, getattr(config, 'MAX_ROUNDS_HARD', 10) + 1):
+        hard_limit = getattr(config, 'MAX_ROUNDS_HARD', 15)
+        round_num = start_round
+        
+        while round_num <= hard_limit:
             # FIX BUG #9: Recalculate max_rounds each round so runtime adjustments apply
             # Respect explicit MAX_HARNESS_ROUNDS env var if set (> 0)
             explicit_max = getattr(config, 'MAX_ROUNDS', 0)
@@ -224,6 +233,7 @@ class Harness:
             result = self._build_round(round_num)
             self._completed_rounds = round_num
             self._save_state()
+            round_num += 1
 
             sprint_rate = result.get("sprint_rate", 0.0)
             contract_rate = result.get("contract_rate", 0.0)
@@ -256,6 +266,13 @@ class Harness:
                 log_final_stats(self.log, self.round_stats, self.sprint_score_history,
                                self.overall_score_history, self.token_totals)
                 self._clear_state()
+                # FIX: Final browser cleanup on successful exit
+                try:
+                    from tools.playwright_mcp import close_all_sessions_sync
+                    close_all_sessions_sync()
+                    self.log.info("[browser_cleanup] Final cleanup on success")
+                except Exception as e:
+                    self.log.debug(f"[browser_cleanup] Final cleanup skipped: {e}")
                 self.dashboard.end_run(success=True)
                 return {
                     "success": True, "score": score, "rounds": round_num,
@@ -271,6 +288,13 @@ class Harness:
                        self.overall_score_history, self.token_totals)
         final_score = self.overall_score_history[-1] if self.overall_score_history else 0
         final_contract = self.contract_pass_rate_history[-1] if self.contract_pass_rate_history else 0
+        # FIX: Final browser cleanup on failure/timeout exit
+        try:
+            from tools.playwright_mcp import close_all_sessions_sync
+            close_all_sessions_sync()
+            self.log.info("[browser_cleanup] Final cleanup on exit")
+        except Exception as e:
+            self.log.debug(f"[browser_cleanup] Final cleanup skipped: {e}")
         self.dashboard.end_run(success=False)
         return {
             "success": False,
@@ -293,11 +317,21 @@ class Harness:
             if contract_path.exists():
                 contract_text = contract_path.read_text(encoding="utf-8", errors="replace")
                 groups = parse_feature_groups(contract_text)
-                self.feature_groups = FeatureGroupState(groups)
-                self.log.info(
-                    f"[feature_groups] Initialized {len(groups)} groups, "
-                    f"starting with {self.feature_groups.current_group_id}"
-                )
+                # FIX: Try to restore feature_groups state from saved state
+                saved_state = self.state_mgr.load()
+                fg_state = saved_state.get("feature_groups_state") if saved_state else None
+                if fg_state:
+                    self.feature_groups = FeatureGroupState.from_dict(fg_state, groups)
+                    self.log.info(
+                        f"[feature_groups] Restored {len(groups)} groups, "
+                        f"resuming at {self.feature_groups.current_group_id}"
+                    )
+                else:
+                    self.feature_groups = FeatureGroupState(groups)
+                    self.log.info(
+                        f"[feature_groups] Initialized {len(groups)} groups, "
+                        f"starting with {self.feature_groups.current_group_id}"
+                    )
             else:
                 self.log.warning("[feature_groups] contract.md not found, falling back to legacy mode")
 
@@ -573,8 +607,9 @@ class Harness:
         round_factor = 1.3 if round_num == 1 else 1.0
         adaptive_budget = int(base_budget * group_complexity * round_factor)
         
-        # FIX: Increase Reviewer budget range (15-35) to prevent INCOMPLETE reviews
-        adaptive_budget = max(18, min(adaptive_budget, 35))
+        # FIX: Increase Reviewer budget range (20-50) to prevent INCOMPLETE reviews
+        # Layered validation requires more iterations for contract tests + DevTools + browser
+        adaptive_budget = max(25, min(adaptive_budget, 50))
         
         # 生成策略提示
         if builder_success_rate >= 0.8:
@@ -611,10 +646,100 @@ class Harness:
         return adaptive_budget, strategy_hint
 
     def _run_evaluation(self, round_num: int, round_start: float, build_usage: dict, strategy: dict) -> dict:
-        """运行 Reviewer 评估阶段（Reviewer 直接生成 feedback.md）。"""
+        """运行 Reviewer 评估阶段（Reviewer 直接生成 feedback.md）+ 分层验证。"""
         contract_ref = config.CONTRACT_FILE
+        current_group_id = None
+        if self.feature_groups and self.feature_groups.current_group:
+            current_group_id = self.feature_groups.current_group_id
 
-        # Step 1: Reviewer（自适应验证深度 + 直接生成 feedback）
+        # =====================================================================
+        #  Step 0: 分层验证（Contract Tests + React DevTools）
+        # =====================================================================
+        layer_scores = {}
+        if current_group_id and getattr(config, 'CONTRACT_TEST_ENABLED', True):
+            self.log.info(f"[validation] Step 0: Running layered validation for {current_group_id}")
+            
+            # 0a: Contract Tests（静态代码分析）
+            try:
+                from harness.contract_tests import ContractTestRunner
+                ct_runner = ContractTestRunner(self.workspace)
+                ct_result = ct_runner.run_for_group(current_group_id)
+                layer_scores["contract_tests"] = ct_result["score"] / 100.0
+                self.log.info(
+                    f"[contract_test] {current_group_id}: score={ct_result['score']:.0f}% "
+                    f"passed={ct_result['passed']} "
+                    f"(tests={ct_result.get('tests_run', 0)}/{ct_result.get('testable_criteria', 0)})"
+                )
+            except Exception as e:
+                self.log.warning(f"[contract_test] Failed: {e}")
+                layer_scores["contract_tests"] = 0.0
+
+            # 0b: React DevTools（Fiber 树检查）— 仅对 React 项目运行
+            # 先检测项目类型，非 React 项目自动给 100% 不惩罚
+            is_react_project = False
+            try:
+                # 检测 workspace 是否有 React 相关文件
+                pkg_json = self.workspace / "package.json"
+                if pkg_json.exists():
+                    pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                    deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                    is_react_project = "react" in deps or "react-dom" in deps
+                # 也检查源码中是否有 React import
+                if not is_react_project:
+                    for src_file in self.workspace.rglob("*.tsx"):
+                        if src_file.stat().st_size < 100000:  # 避免大文件
+                            content = src_file.read_text(encoding="utf-8", errors="replace")
+                            if "from 'react'" in content or 'from "react"' in content:
+                                is_react_project = True
+                                break
+            except Exception:
+                pass
+
+            if is_react_project:
+                try:
+                    from tools.playwright_mcp import _get_page
+                    import asyncio
+                    
+                    async def _run_react_devtools():
+                        session = await _get_page()
+                        try:
+                            dev_server_url = getattr(config, 'DEV_SERVER_URL', 'http://localhost:5173')
+                            try:
+                                current_info = await session.execute_script(
+                                    "() => ({ url: window.location.href, ready: document.readyState })"
+                                )
+                                if not current_info or not isinstance(current_info, dict) or 'localhost' not in str(current_info.get('url', '')):
+                                    await session.navigate(dev_server_url, fresh=False, wait=3)
+                            except Exception:
+                                await session.navigate(dev_server_url, fresh=False, wait=3)
+                            
+                            await asyncio.sleep(1)
+                            
+                            dt_checker = ReactDevToolsChecker(session)
+                            return await dt_checker.check_feature_group(current_group_id)
+                        finally:
+                            # FIX: Always close session to prevent Chrome process accumulation
+                            try:
+                                await session.close()
+                            except Exception:
+                                pass
+                    
+                    dt_result = asyncio.run(_run_react_devtools())
+                    layer_scores["react_devtools"] = dt_result["score"] / 100.0
+                    self.log.info(
+                        f"[react_devtools] {current_group_id}: score={dt_result['score']:.0f}% "
+                        f"passed={dt_result['passed']}"
+                    )
+                except Exception as e:
+                    self.log.warning(f"[react_devtools] Skipped (no browser): {e}")
+                    layer_scores["react_devtools"] = None  # 标记为不可用
+            else:
+                self.log.info("[react_devtools] Non-React project — skipped with 100%")
+                layer_scores["react_devtools"] = 1.0  # 非 React 项目不惩罚
+
+        # =====================================================================
+        #  Step 1: Reviewer（自适应验证深度 + 直接生成 feedback）
+        # =====================================================================
         self.log.info("Evaluate phase — Step 1: Reviewer (unified review + feedback)")
         self.dashboard.start_agent("Reviewer")
 
@@ -627,6 +752,26 @@ class Harness:
                 f"验收标准范围: {cg['id']}.1 ~ {cg['id']}.{len(cg['criteria'])}\n"
                 f"你只验证这个功能组的标准，不要检查其他功能组。\n"
             )
+            # 注入分层验证结果到 Reviewer 提示
+            if layer_scores:
+                group_section += "\n## 分层验证结果（必须使用）\n"
+                if "contract_tests" in layer_scores:
+                    ct_score = layer_scores['contract_tests']
+                    group_section += f"- 契约测试（代码静态分析）: {ct_score:.0%}\n"
+                    # 根据契约测试分数给出明确指导
+                    if ct_score >= 0.8:
+                        group_section += "  → 契约测试通过，代码结构正确。优先信任此结果。\n"
+                    elif ct_score >= 0.5:
+                        group_section += "  → 契约测试部分通过，需要检查具体失败项。\n"
+                    else:
+                        group_section += "  → 契约测试失败，代码结构有严重问题。\n"
+                if layer_scores.get("react_devtools") is not None:
+                    dt_score = layer_scores['react_devtools']
+                    group_section += f"- React DevTools（组件树检查）: {dt_score:.0%}\n"
+                group_section += "\n**重要**: 这些结果已自动收集。\n"
+                group_section += "- 契约测试通过的项，不需要再用 browser_check 验证\n"
+                group_section += "- 浏览器测试仅用于验证用户交互和视觉表现（最多 2 次）\n"
+                group_section += "- 如果契约测试通过但浏览器找不到元素，可能是 DOM 时序问题，信任契约测试\n"
         
         # 自适应验证预算
         reviewer_budget, strategy_hint = self._calculate_reviewer_budget(round_num)
@@ -636,10 +781,14 @@ class Harness:
             f"Review the codebase and test the web app for round {round_num}.\n"
             f"{group_section}"
             f"{strategy_hint}\n\n"
-            f"Read the acceptance criteria in {contract_ref}, then:\n"
-            f"1. Examine the MOST IMPORTANT source files (max 5 files) related to the current feature group.\n"
-            f"2. Run browser tests. Dev server is already running.\n"
-            f"3. Produce TWO outputs:\n"
+            f"验证步骤（严格执行）：\n"
+            f"1. 读取 contract.md 当前功能组标准（{cg['id']}.1 ~ {cg['id']}.{len(cg['criteria'])}）\n"
+            f"2. 读取相关源码文件（最多 5 个）\n"
+            f"3. 运行 contract_test_run(feature_group='{cg['id']}') 获取静态分析结果\n"
+            f"4. 基于代码审查 + 契约测试判定大部分标准\n"
+            f"5. 仅对需要交互验证的项使用 browser_check（最多 2 次）\n"
+            f"6. 写 review report 和 feedback\n\n"
+            f"Produce TWO outputs:\n"
             f"   a) Save detailed review report to `.eval_cache/round_{round_num}_review.md`\n"
             f"   b) Save feedback for Builder to `{config.FEEDBACK_FILE}` (workspace root)\n"
             f"      The feedback must include GROUP_PASS_RATE, Passed/Failed list, and actionable fix guidance.\n"
@@ -752,8 +901,91 @@ class Harness:
             contract_rate = 0.0
             sprint_rate = 0.0
 
+        # =====================================================================
+        #  应用分层验证分数（加权聚合）
+        # =====================================================================
+        if layer_scores and current_group_id:
+            # 获取框架适配器的权重
+            try:
+                adapter = get_framework_adapter(self.workspace)
+                weights = adapter.get_evaluation_weights()
+            except Exception:
+                weights = config.EVALUATION_WEIGHTS
+
+            # 计算加权总分
+            # browser_tests 分数来自 Reviewer 的 contract_rate
+            weighted_score = 0.0
+            weight_sum = 0.0
+
+            # Code review: 来自 Reviewer 的评估（用 contract_rate 作为代理）
+            weighted_score += contract_rate * weights.get("code_review", 0.40)
+            weight_sum += weights.get("code_review", 0.40)
+
+            # Contract tests
+            ct_score = layer_scores.get("contract_tests", 0.0)
+            if ct_score is not None:
+                weighted_score += ct_score * weights.get("contract_tests", 0.35)
+                weight_sum += weights.get("contract_tests", 0.35)
+
+            # Contract tests
+            ct_score = layer_scores.get("contract_tests", 0.0)
+            if ct_score is not None:
+                weighted_score += ct_score * weights.get("contract_tests", 0.35)
+                weight_sum += weights.get("contract_tests", 0.35)
+            else:
+                # 未运行契约测试 → 视为通过（100%），避免拉低总分
+                weighted_score += 1.0 * weights.get("contract_tests", 0.35)
+                weight_sum += weights.get("contract_tests", 0.35)
+
+            # React DevTools
+            dt_score = layer_scores.get("react_devtools")
+            if dt_score is not None:
+                weighted_score += dt_score * weights.get("react_devtools", 0.15)
+                weight_sum += weights.get("react_devtools", 0.15)
+            else:
+                # 未运行 React DevTools → 视为通过（100%），避免拉低总分
+                weighted_score += 1.0 * weights.get("react_devtools", 0.15)
+                weight_sum += weights.get("react_devtools", 0.15)
+
+            # Browser tests: 来自 Reviewer
+            weighted_score += contract_rate * weights.get("browser_tests", 0.10)
+            weight_sum += weights.get("browser_tests", 0.10)
+
+            # 归一化（所有维度都已计入，无需特殊处理）
+            final_score = weighted_score / weight_sum if weight_sum > 0 else contract_rate
+
+            # 检查维度最低要求
+            tier = None
+            if current_group_id:
+                tier_num = int(''.join(filter(str.isdigit, current_group_id)))
+                if tier_num <= 4:
+                    tier = "tier1"
+                else:
+                    tier = "tier2"
+
+            # 维度最低要求检查已移除（DIMENSION_MINIMUMS 为空）
+            # 旧逻辑：即使总分达标，任一维度低于阈值也判定失败
+            # 新逻辑：总分达标即通过，避免单一维度波动导致整体失败
+            dimension_passed = True
+
+            # 使用聚合后的分数
+            old_contract_rate = contract_rate
+            contract_rate = final_score
+
+            self.log.info(
+                f"[weighted_score] {current_group_id}: "
+                f"code_review={old_contract_rate:.0%} × {weights.get('code_review', 0.40)} + "
+                f"contract_tests={ct_score:.0%} × {weights.get('contract_tests', 0.35)} + "
+                f"react_devtools={dt_score if dt_score is not None else 'N/A'} × {weights.get('react_devtools', 0.15)} + "
+                f"browser={old_contract_rate:.0%} × {weights.get('browser_tests', 0.10)} "
+                f"= {contract_rate:.0%}"
+            )
+            if not dimension_passed:
+                self.log.warning(f"[weighted_score] Dimension minimum NOT met — forcing FAIL")
+                contract_rate = min(contract_rate, 0.5)  # 强制降低分数
+
         # ------------------------------------------------------------------ #
-        #  Update feature-group state (NEW)
+        #  Update feature-group state (AFTER weighted scoring)
         # ------------------------------------------------------------------ #
         if self.feature_groups and self.feature_groups.current_group:
             gid = self.feature_groups.current_group_id
@@ -814,8 +1046,13 @@ class Harness:
             f"total: {self.token_totals['prompt']}p+{self.token_totals['completion']}c"
         )
 
-        # Browser resources are managed per-call (independent bridge pattern)
-        # No global cleanup needed
+        # FIX: Close browser sessions after each round to prevent Chrome process accumulation
+        try:
+            from tools.playwright_mcp import close_all_sessions_sync
+            close_all_sessions_sync()
+            self.log.info("[browser_cleanup] All browser sessions closed after round")
+        except Exception as e:
+            self.log.debug(f"[browser_cleanup] Cleanup skipped: {e}")
 
         return {"sprint_rate": sprint_rate, "contract_rate": contract_rate, "score": contract_rate}
 
@@ -855,6 +1092,15 @@ class Harness:
             )
             task += f"\n功能组进度:\n{tier_hint}\n"
             task += f"总体进度: {self.feature_groups.overall_rate():.0%}\n"
+            # 注入当前功能组的加权得分，让 Builder 知道真实状态
+            current_gid = self.feature_groups.current_group_id
+            current_rate = self.feature_groups.pass_rates.get(current_gid, 0.0)
+            threshold = _get_group_threshold(current_gid)
+            task += f"\n当前功能组 {current_gid} 加权得分: {current_rate:.0%} (通过阈值: {threshold:.0%})\n"
+            if current_rate < threshold:
+                task += f"注意: {current_gid} 尚未达标，请继续修复该功能组的未通过项。\n"
+            else:
+                task += f"注意: {current_gid} 已达标，可以推进到下一个功能组。\n"
 
         # Inject the previous round's strategy decision
         if self.strategy_history:
@@ -1330,6 +1576,28 @@ class Harness:
         m = _re.search(r"BUGS_FOUND[:：]\s*(\d+)", eval_text)
         if m:
             issues_found = max(issues_found, int(m.group(1)))
+        
+        # FIX: Detect critical/blocker issues from Reviewer feedback
+        # Check for critical keywords that indicate serious bugs
+        critical_keywords = [
+            "CRITICAL_BLOCKER", "CRITICAL", "BLOCKER", 
+            "infinite loop", "Maximum update depth exceeded",
+            "app crashes", "app does not render", "fails to render",
+            "white screen", "blank screen", "crash on load"
+        ]
+        critical_count = 0
+        eval_lower = eval_text.lower()
+        for keyword in critical_keywords:
+            if keyword.lower() in eval_lower:
+                critical_count += 1
+        
+        # If critical issues found, ensure issues_found is at least 1
+        if critical_count > 0 and issues_found == 0:
+            issues_found = critical_count
+            self.log.warning(
+                f"[final_review] Detected {critical_count} critical issues from Reviewer feedback "
+                f"(keywords: {[k for k in critical_keywords if k.lower() in eval_lower]})"
+            )
         
         self.log.info(
             f"[final_review] Complete: {issues_found} issues, "

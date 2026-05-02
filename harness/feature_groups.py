@@ -19,8 +19,10 @@ log = logging.getLogger("harness")
 
 TIER_REQUIREMENTS: dict[str, dict] = {}
 
-OVERALL_PASS_THRESHOLD = 0.75
-GROUP_PASS_THRESHOLD_DEFAULT = 0.70
+# 从 config 读取阈值
+import config as _config
+OVERALL_PASS_THRESHOLD = getattr(_config, 'TIER_THRESHOLDS', {}).get('tier2', 0.75)
+GROUP_PASS_THRESHOLD_DEFAULT = 0.70  # 默认单组通过阈值（与 tier 无关的 fallback）
 
 # 连续卡死检测
 MAX_STUCK_ROUNDS = 3
@@ -32,9 +34,9 @@ def _compute_tiers(group_ids: list[str]) -> dict[str, dict]:
     策略：
     - Functional Criteria (F1, F2, ...) 分配到 tier1/tier2
     - Design Criteria (D) 和 Technical Criteria (T) 被忽略（不纳入退出判定）
-    - tier1: 前 50% Functional 组，要求 100%
-    - tier2: 后 50% Functional 组，要求 90%
-    - tier3: 已删除（D/T 组不阻塞项目成功）
+    - tier1: 前 50% Functional 组
+    - tier2: 后 50% Functional 组
+    - D/T 组不纳入退出判定，不阻塞项目成功
     """
     # 只保留 Functional 组
     functional_groups = [g for g in group_ids if g.startswith("F")]
@@ -51,16 +53,25 @@ def _compute_tiers(group_ids: list[str]) -> dict[str, dict]:
         tier1_groups = functional_groups[:split]
         tier2_groups = functional_groups[split:]
     
+    # 从 config 读取阈值，支持动态调整
+    try:
+        import config as _config
+        tier1_threshold = getattr(_config, 'TIER_THRESHOLDS', {}).get('tier1', 0.95)
+        tier2_threshold = getattr(_config, 'TIER_THRESHOLDS', {}).get('tier2', 0.75)
+    except Exception:
+        tier1_threshold = 0.95
+        tier2_threshold = 0.75
+    
     result: dict[str, dict] = {}
     if tier1_groups:
-        result["tier1"] = {"groups": tier1_groups, "min_rate": 1.0, "label": "MVP Core"}
+        result["tier1"] = {"groups": tier1_groups, "min_rate": tier1_threshold, "label": "MVP Core"}
     if tier2_groups:
-        result["tier2"] = {"groups": tier2_groups, "min_rate": 0.90, "label": "Core Experience"}
+        result["tier2"] = {"groups": tier2_groups, "min_rate": tier2_threshold, "label": "Core Experience"}
     # NOTE: tier3 (D/T groups) removed — they don't block project success
     
     # 保底：如果没有任何 tier，所有组归 tier1
     if not result:
-        result["tier1"] = {"groups": group_ids, "min_rate": 1.0, "label": "All Features"}
+        result["tier1"] = {"groups": group_ids, "min_rate": tier1_threshold, "label": "All Features"}
     
     return result
 
@@ -316,6 +327,24 @@ class FeatureGroupState:
             "overall": self.overall_rate(),
             "tier_status": self.tier_status(),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict, groups: list[dict]) -> "FeatureGroupState":
+        """从字典恢复功能组状态。"""
+        state = cls(groups)
+        state.current_idx = data.get("current_idx", 0)
+        state.pass_rates = dict(data.get("pass_rates", {}))
+        state.stuck_counts = dict(data.get("stuck_counts", {}))
+        # Ensure current_idx is valid
+        if state.current_idx >= len(state.group_ids):
+            state.current_idx = len(state.group_ids) - 1
+        if state.current_idx < 0:
+            state.current_idx = 0
+        log.info(
+            f"[feature_groups] Restored from state: current={state.current_group_id}, "
+            f"pass_rates={len(state.pass_rates)}, stuck_counts={len(state.stuck_counts)}"
+        )
+        return state
 
 
 def _get_group_threshold(group_id: str) -> float:

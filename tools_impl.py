@@ -1081,14 +1081,35 @@ _dev_server_proc = None
 
 
 def _kill_port(port: int) -> None:
-    """"""
+    """Kill process listening on a port."""
     if os.name == "nt":
         run_bash(
             f'for /f "tokens=5" %a in ("netstat -ano ^| findstr :{port}") do taskkill /F /PID %a 2>nul',
             timeout=10,
         )
     else:
-        run_bash(f"fuser -k {port}/tcp 2>/dev/null || lsof -ti:{port} | xargs kill -9 2>/dev/null; echo done", timeout=10)
+        # Try fuser/lsof first, fallback to Python /proc scan
+        run_bash(f"fuser -k {port}/tcp 2>/dev/null || lsof -ti:{port} | xargs kill -9 2>/dev/null || true", timeout=10)
+        # Python fallback: scan /proc for processes with socket on this port
+        try:
+            import glob, struct
+            port_hex = format(port, '04X')
+            for tcp_file in glob.glob('/proc/[0-9]*/fd/[0-9]*'):
+                try:
+                    link = os.readlink(tcp_file)
+                    if 'socket:' in link:
+                        # Check if this process's cmdline contains vite/npm
+                        pid = tcp_file.split('/')[2]
+                        cmdline_path = f'/proc/{pid}/cmdline'
+                        if os.path.exists(cmdline_path):
+                            with open(cmdline_path, 'rb') as f:
+                                cmd = f.read().decode('utf-8', 'replace')
+                            if 'vite' in cmd or 'npm' in cmd:
+                                os.kill(int(pid), signal.SIGTERM)
+                except (OSError, ValueError, ProcessLookupError):
+                    pass
+        except Exception:
+            pass
 
 def _kill_dev_server() -> None:
     """Kill dev server and clear build caches to prevent stale content."""
@@ -1097,9 +1118,23 @@ def _kill_dev_server() -> None:
     for p in (3000, 5173, 5174, 5175, 5176, 5177, 5178, 5179, 5180,
               5181, 5182, 5183, 5184, 5185, 5186, 5187, 5188, 5189, 5190):
         _kill_port(p)
-    # Also kill any process holding vite-related file locks
+    # Also kill any process holding vite-related file locks (Python fallback for containers without pkill)
     if os.name != "nt":
-        run_bash("pkill -f 'vite' 2>/dev/null || true", timeout=10)
+        try:
+            import glob
+            for pid_dir in glob.glob('/proc/[0-9]*'):
+                try:
+                    pid = int(os.path.basename(pid_dir))
+                    exe = os.readlink(f'{pid_dir}/exe')
+                    if 'node' in exe:
+                        with open(f'{pid_dir}/cmdline', 'rb') as f:
+                            cmd = f.read().decode('utf-8', 'replace')
+                        if 'vite' in cmd or ('npm' in cmd and 'dev' in cmd):
+                            os.kill(pid, signal.SIGTERM)
+                except (OSError, ValueError, ProcessLookupError):
+                    pass
+        except Exception:
+            pass
     # Give processes time to release file locks before clearing cache
     time.sleep(2)
     # FIX: Clear Turbopack dev cache so the next dev server restart
@@ -1220,6 +1255,104 @@ def start_dev_server(command: str = "npm run dev", port: int = 3000, wait: int =
             return f"[error] Server started but health check failed. HTTP status: {resp.status}."
     except Exception as e:
         return f"[error] Health check failed: {e}"
+
+def react_devtools_inspect(
+    component_name: str,
+    check_props: dict | None = None,
+    check_state: dict | None = None,
+) -> str:
+    """Inspect React component tree using React DevTools protocol.
+    
+    This bypasses DOM timing issues by checking the React Fiber tree directly.
+    Use this when browser_check fails to find dynamically rendered components.
+    """
+    try:
+        import asyncio
+        from harness.react_devtools import ReactDevToolsInspector
+        
+        # 获取当前 Playwright session（BrowserSession 对象）
+        from tools.playwright_mcp import _get_page
+        session = asyncio.get_event_loop().run_until_complete(_get_page())
+        
+        try:
+            inspector = ReactDevToolsInspector(session)
+            
+            # 检查组件存在
+            exists, count = asyncio.get_event_loop().run_until_complete(
+                inspector.check_component_exists(component_name)
+            )
+            
+            if not exists:
+                # 列出所有组件帮助调试
+                all_components = asyncio.get_event_loop().run_until_complete(
+                    inspector.list_all_components()
+                )
+                names = list(dict.fromkeys([c["name"] for c in all_components[:30]]))
+                return json.dumps({
+                    "component": component_name,
+                    "found": False,
+                    "similar_components": [n for n in names if component_name.lower() in n.lower() or n.lower() in component_name.lower()][:5],
+                    "all_components": names[:15],
+                }, indent=2, ensure_ascii=False)
+            
+            result = {
+                "component": component_name,
+                "found": True,
+                "count": count,
+            }
+            
+            # 检查 props
+            if check_props:
+                props = asyncio.get_event_loop().run_until_complete(
+                    inspector.get_component_props(component_name)
+                )
+                if props:
+                    props_match = all(
+                        props.get(k) == v or str(props.get(k)) == str(v)
+                        for k, v in check_props.items()
+                    )
+                    result["props_match"] = props_match
+                    result["actual_props"] = props
+                else:
+                    result["props_match"] = False
+                    result["actual_props"] = None
+            
+            return json.dumps(result, indent=2, ensure_ascii=False)
+        finally:
+            # FIX: Always close session to prevent Chrome process accumulation
+            try:
+                asyncio.get_event_loop().run_until_complete(session.close())
+            except Exception:
+                pass
+        
+    except Exception as e:
+        return f"[error] React DevTools inspection failed: {e}"
+
+
+def contract_test_run(feature_group: str) -> str:
+    """Run contract tests for the specified feature group.
+    
+    Analyzes source code statically to verify contract criteria without browser.
+    Returns per-criterion scores and overall pass/fail status.
+    """
+    try:
+        from harness.contract_tests import ContractTestRunner
+        
+        runner = ContractTestRunner(Path(config.WORKSPACE))
+        result = runner.run_for_group(feature_group)
+        
+        return json.dumps({
+            "feature_group": feature_group,
+            "score": result["score"],
+            "passed": result["passed"],
+            "testable_criteria": result.get("testable_criteria", 0),
+            "tests_run": result.get("tests_run", 0),
+            "results": result["results"],
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Contract test failed: {e}"
+
 
 def browser_check(
     url: str = "http://localhost:5173",
@@ -1472,7 +1605,61 @@ TOOL_SCHEMAS = [
     },
 ]
 
+CONTRACT_TEST_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "contract_test_run",
+        "description": (
+            "Run static contract tests for a feature group. Analyzes source code to verify "
+            "contract criteria without browser automation. Use this BEFORE browser_check to "
+            "quickly verify code correctness. Returns per-criterion scores."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "feature_group": {
+                    "type": "string",
+                    "description": "Feature group ID, e.g. 'F6', 'F7'",
+                },
+            },
+            "required": ["feature_group"],
+        },
+    },
+}
+
+REACT_DEVTOOLS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "react_devtools_inspect",
+        "description": (
+            "Inspect React component tree via DevTools protocol. Bypasses DOM timing issues "
+            "by checking the React Fiber tree directly. Use when browser_check cannot find "
+            "dynamically rendered components (e.g., cursors, animations)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "component_name": {
+                    "type": "string",
+                    "description": "React component name to find (e.g., 'CursorElement', 'Cursors')",
+                },
+                "check_props": {
+                    "type": "object",
+                    "description": "Expected props (optional). Example: {visible: true}",
+                },
+                "check_state": {
+                    "type": "object",
+                    "description": "Expected state (optional)",
+                },
+            },
+            "required": ["component_name"],
+        },
+    },
+}
+
 BROWSER_TOOL_SCHEMAS = [
+    CONTRACT_TEST_SCHEMA,
+    REACT_DEVTOOLS_SCHEMA,
     {
         "type": "function",
         "function": {
@@ -1608,6 +1795,8 @@ TOOL_DISPATCH = {
     "analyze_image": analyze_image,
     "validate_build": validate_build,
     "project_init": project_init,
+    "contract_test_run": contract_test_run,
+    "react_devtools_inspect": react_devtools_inspect,
 }
 
 

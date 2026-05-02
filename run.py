@@ -26,15 +26,22 @@ def main() -> int:
 
     prompt = sys.argv[1]
     
-    # Create timestamped workspace under projects/
-    projects_dir = Path(os.environ.get("HARNESS_PROJECTS_DIR", "./projects"))
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    
-    # Create a safe directory name from the prompt
-    safe_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in prompt[:40]).strip("-").lower()
-    workspace = projects_dir / f"{safe_name}-{timestamp}"
-    workspace.mkdir(parents=True, exist_ok=True)
+    # Support HARNESS_WORKSPACE for resuming existing projects
+    workspace_env = os.environ.get("HARNESS_WORKSPACE")
+    if workspace_env:
+        workspace = Path(workspace_env)
+        print(f"[run] Using existing workspace: {workspace}")
+    else:
+        # Create timestamped workspace under projects/
+        projects_dir = Path(os.environ.get("HARNESS_PROJECTS_DIR", "./projects"))
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        
+        # Create a safe directory name from the prompt
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in prompt[:40]).strip("-").lower()
+        workspace = projects_dir / f"{safe_name}-{timestamp}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        print(f"[run] Created new workspace: {workspace}")
     
     harness = Harness(str(workspace))
     result = harness.run(prompt)

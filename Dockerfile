@@ -16,5 +16,6 @@ COPY context.py ./
 COPY dashboard.py ./
 COPY eval_cache.py ./
 COPY workspace_state.py ./
+COPY docs/ ./docs/
 
 CMD ["python", "run.py"]
