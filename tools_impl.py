@@ -1451,6 +1451,608 @@ def check_console_logs(
         return f"[error] Failed to get console logs: {e}"
 
 
+def check_responsive(
+    url: str = "http://localhost:5173",
+    breakpoints: list[dict] | None = None,
+    fresh: bool = True,
+) -> str:
+    """在多个视口尺寸下截图并检查布局问题。
+    
+    Args:
+        url: 目标 URL
+        breakpoints: 视口尺寸列表，默认 [mobile, tablet, desktop]
+        fresh: 是否强制刷新（默认 True，避免缓存）
+    
+    Returns:
+        JSON 格式的各尺寸截图结果和布局检查
+    """
+    try:
+        import asyncio
+        from tools.playwright_mcp import _browser_check_async
+        
+        default_breakpoints = [
+            {"name": "mobile", "width": 375, "height": 667},
+            {"name": "tablet", "width": 768, "height": 1024},
+            {"name": "desktop", "width": 1280, "height": 720},
+            {"name": "wide", "width": 1920, "height": 1080},
+        ]
+        bps = breakpoints or default_breakpoints
+        
+        async def _check_one(bp: dict) -> dict:
+            viewport = {"width": bp["width"], "height": bp["height"]}
+            result = await _browser_check_async(
+                url=url,
+                mode="screenshot",
+                viewport=viewport,
+                fresh=fresh,
+                wait=3,
+                screenshot=True,
+            )
+            if isinstance(result, dict):
+                screenshot_file = result.get("screenshot", "")
+                # 获取页面结构摘要
+                inspect_result = await _browser_check_async(
+                    url=url,
+                    mode="inspect",
+                    viewport=viewport,
+                    fresh=False,
+                    wait=2,
+                    script="""
+                        return {
+                            scrollWidth: document.documentElement.scrollWidth,
+                            scrollHeight: document.documentElement.scrollHeight,
+                            viewportWidth: window.innerWidth,
+                            viewportHeight: window.innerHeight,
+                            hasHorizontalScroll: document.documentElement.scrollWidth > window.innerWidth,
+                            bodyOverflow: getComputedStyle(document.body).overflow,
+                            metaViewport: !!document.querySelector('meta[name="viewport"]'),
+                        };
+                    """,
+                )
+                inspect_data = inspect_result.get("script_result", {}) if isinstance(inspect_result, dict) else {}
+                return {
+                    "breakpoint": bp["name"],
+                    "viewport": viewport,
+                    "screenshot": screenshot_file,
+                    "has_horizontal_scroll": inspect_data.get("hasHorizontalScroll", False),
+                    "scroll_height": inspect_data.get("scrollHeight", 0),
+                    "meta_viewport": inspect_data.get("metaViewport", False),
+                    "status": "ok",
+                }
+            return {"breakpoint": bp["name"], "status": "error", "error": str(result)}
+        
+        async def _run_all():
+            results = []
+            for bp in bps:
+                result = await _check_one(bp)
+                results.append(result)
+                await asyncio.sleep(0.5)
+            return results
+        
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: asyncio.run(_run_all()))
+                all_results = future.result(timeout=120)
+        except RuntimeError:
+            all_results = asyncio.run(_run_all())
+        
+        # 分析结果
+        issues = []
+        for r in all_results:
+            if r.get("has_horizontal_scroll"):
+                issues.append(f"{r['breakpoint']}: Horizontal scroll detected (layout overflow)")
+            if not r.get("meta_viewport") and r["breakpoint"] == "mobile":
+                issues.append("mobile: Missing viewport meta tag")
+        
+        return json.dumps({
+            "breakpoints_tested": len(all_results),
+            "results": all_results,
+            "issues": issues,
+            "has_issues": len(issues) > 0,
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Responsive check failed: {e}"
+
+
+def check_a11y(
+    url: str = "http://localhost:5173",
+    rules: list[str] | None = None,
+    fresh: bool = False,
+) -> str:
+    """检查无障碍问题（基于 DOM 分析）。
+    
+    Args:
+        url: 目标 URL
+        rules: 检查规则列表，默认全部
+        fresh: 是否强制刷新
+    
+    Returns:
+        JSON 格式的无障碍检查结果
+    """
+    try:
+        import asyncio
+        from tools.playwright_mcp import _browser_check_async
+        
+        default_rules = ["alt", "labels", "contrast", "focus", "landmarks", "headings"]
+        check_rules = rules or default_rules
+        
+        async def _run_check():
+            # 运行全面的 DOM 无障碍检查脚本
+            script = """
+                (() => {
+                    const results = {
+                        images_without_alt: [],
+                        inputs_without_labels: [],
+                        buttons_without_text: [],
+                        low_contrast_elements: [],
+                        missing_focus_indicators: [],
+                        missing_landmarks: [],
+                        heading_issues: [],
+                    };
+                    
+                    // 1. 图片 alt 检查
+                    document.querySelectorAll('img').forEach(img => {
+                        if (!img.alt && !img.getAttribute('aria-label')) {
+                            results.images_without_alt.push({
+                                src: img.src?.split('/').pop() || 'unknown',
+                                tag: img.outerHTML?.substring(0, 100) || '<img>',
+                            });
+                        }
+                    });
+                    
+                    // 2. 输入框 label 检查
+                    document.querySelectorAll('input, select, textarea').forEach(el => {
+                        const id = el.id;
+                        const ariaLabel = el.getAttribute('aria-label');
+                        const ariaLabelledBy = el.getAttribute('aria-labelledby');
+                        const hasLabel = id && document.querySelector(`label[for="${id}"]`);
+                        const hasPlaceholder = el.placeholder;
+                        if (!hasLabel && !ariaLabel && !ariaLabelledBy && !hasPlaceholder) {
+                            results.inputs_without_labels.push({
+                                type: el.type || el.tagName,
+                                id: id || 'no-id',
+                            });
+                        }
+                    });
+                    
+                    // 3. 按钮文本检查
+                    document.querySelectorAll('button').forEach(btn => {
+                        const text = btn.textContent?.trim();
+                        const ariaLabel = btn.getAttribute('aria-label');
+                        if (!text && !ariaLabel) {
+                            results.buttons_without_text.push({
+                                class: btn.className?.substring(0, 50) || 'no-class',
+                            });
+                        }
+                    });
+                    
+                    // 4. 焦点指示器检查（简化版）
+                    const focusable = document.querySelectorAll('button, a, input, select, textarea, [tabindex]:not([tabindex="-1"])');
+                    focusable.forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        const outline = style.outline;
+                        if (outline === 'none' || outline === '0px') {
+                            // 检查是否有替代的焦点样式
+                            const hasFocusStyle = el.matches(':focus-visible') || 
+                                getComputedStyle(document.documentElement).getPropertyValue('--focus-ring');
+                            if (!hasFocusStyle) {
+                                results.missing_focus_indicators.push({
+                                    tag: el.tagName,
+                                    class: el.className?.substring(0, 50) || '',
+                                });
+                            }
+                        }
+                    });
+                    
+                    // 5. Landmark 检查
+                    const landmarks = document.querySelectorAll('main, nav, aside, header, footer, [role="main"], [role="navigation"]');
+                    if (landmarks.length === 0) {
+                        results.missing_landmarks.push("No semantic landmarks found");
+                    }
+                    
+                    // 6. 标题层级检查
+                    const h1s = document.querySelectorAll('h1');
+                    if (h1s.length === 0) {
+                        results.heading_issues.push("Missing h1 heading");
+                    } else if (h1s.length > 1) {
+                        results.heading_issues.push(`Multiple h1 headings (${h1s.length})`);
+                    }
+                    
+                    // 检查标题层级跳跃
+                    let lastLevel = 0;
+                    document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => {
+                        const level = parseInt(h.tagName[1]);
+                        if (level > lastLevel + 1) {
+                            results.heading_issues.push(`Heading jump: h${lastLevel} to h${level}`);
+                        }
+                        lastLevel = level;
+                    });
+                    
+                    return results;
+                })()
+            """
+            
+            result = await _browser_check_async(
+                url=url,
+                mode="inspect",
+                fresh=fresh,
+                wait=3,
+                script=script,
+            )
+            return result.get("script_result", {}) if isinstance(result, dict) else {}
+        
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: asyncio.run(_run_check()))
+                a11y_data = future.result(timeout=60)
+        except RuntimeError:
+            a11y_data = asyncio.run(_run_check())
+        
+        # 根据请求的 rules 过滤结果
+        summary = {}
+        total_issues = 0
+        
+        if "alt" in check_rules:
+            imgs = a11y_data.get("images_without_alt", [])
+            summary["images_without_alt"] = {"count": len(imgs), "samples": imgs[:3]}
+            total_issues += len(imgs)
+        
+        if "labels" in check_rules:
+            inputs = a11y_data.get("inputs_without_labels", [])
+            summary["inputs_without_labels"] = {"count": len(inputs), "samples": inputs[:3]}
+            total_issues += len(inputs)
+        
+        if "focus" in check_rules:
+            focus = a11y_data.get("missing_focus_indicators", [])
+            summary["missing_focus_indicators"] = {"count": len(focus), "samples": focus[:3]}
+            total_issues += len(focus)
+        
+        if "landmarks" in check_rules:
+            landmarks = a11y_data.get("missing_landmarks", [])
+            summary["missing_landmarks"] = {"count": len(landmarks), "issues": landmarks}
+            total_issues += len(landmarks)
+        
+        if "headings" in check_rules:
+            headings = a11y_data.get("heading_issues", [])
+            summary["heading_issues"] = {"count": len(headings), "issues": headings}
+            total_issues += len(headings)
+        
+        if "contrast" in check_rules:
+            # 简化对比度检查（实际应计算颜色对比度）
+            summary["contrast_check"] = "Manual review recommended for color contrast"
+        
+        return json.dumps({
+            "rules_checked": check_rules,
+            "total_issues": total_issues,
+            "summary": summary,
+            "status": "pass" if total_issues == 0 else "issues_found",
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Accessibility check failed: {e}"
+
+
+def check_performance(
+    url: str = "http://localhost:5173",
+    metrics: list[str] | None = None,
+    fresh: bool = True,
+) -> str:
+    """获取性能指标（通过 Performance API）。
+    
+    Args:
+        url: 目标 URL
+        metrics: 指标列表 ["lcp", "fid", "cls", "tti", "tbt", "fcp", "ttfb"]
+        fresh: 是否强制刷新（默认 True，确保冷加载）
+    
+    Returns:
+        JSON 格式的性能指标
+    """
+    try:
+        import asyncio
+        from tools.playwright_mcp import _browser_check_async
+        
+        default_metrics = ["fcp", "lcp", "tti", "cls", "tbt", "ttfb"]
+        check_metrics = metrics or default_metrics
+        
+        async def _run_check():
+            # 使用 Performance API 和 PerformanceObserver
+            script = """
+                (() => {
+                    const perfData = performance.getEntriesByType('navigation')[0];
+                    const paintEntries = performance.getEntriesByType('paint');
+                    const lcpEntries = performance.getEntriesByType('largest-contentful-paint');
+                    const clsEntries = performance.getEntriesByType('layout-shift');
+                    
+                    const fcp = paintEntries.find(e => e.name === 'first-contentful-paint')?.startTime;
+                    const lcp = lcpEntries.length > 0 ? lcpEntries[lcpEntries.length - 1].startTime : null;
+                    
+                    // 计算 CLS
+                    let cls = 0;
+                    clsEntries.forEach(entry => {
+                        if (!entry.hadRecentInput) {
+                            cls += entry.value;
+                        }
+                    });
+                    
+                    return {
+                        // Navigation Timing
+                        ttfb: perfData?.responseStart - perfData?.startTime,
+                        fcp: fcp,
+                        lcp: lcp,
+                        domInteractive: perfData?.domInteractive,
+                        domComplete: perfData?.domComplete,
+                        loadComplete: perfData?.loadEventEnd,
+                        
+                        // 资源统计
+                        resourceCount: performance.getEntriesByType('resource').length,
+                        totalTransferSize: performance.getEntriesByType('resource').reduce((sum, r) => sum + (r.transferSize || 0), 0),
+                        
+                        // CLS
+                        cls: cls,
+                        
+                        // 内存（如果可用）
+                        memoryUsed: performance.memory?.usedJSHeapSize,
+                        memoryTotal: performance.memory?.totalJSHeapSize,
+                    };
+                })()
+            """
+            
+            result = await _browser_check_async(
+                url=url,
+                mode="inspect",
+                fresh=fresh,
+                wait=5,  # 等待更长以确保 LCP
+                script=script,
+            )
+            return result.get("script_result", {}) if isinstance(result, dict) else {}
+        
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: asyncio.run(_run_check()))
+                perf_data = future.result(timeout=60)
+        except RuntimeError:
+            perf_data = asyncio.run(_run_check())
+        
+        # 评估指标
+        evaluations = {}
+        
+        if "ttfb" in check_metrics and perf_data.get("ttfb") is not None:
+            ttfb = perf_data["ttfb"]
+            evaluations["ttfb"] = {
+                "value": round(ttfb, 1),
+                "unit": "ms",
+                "rating": "good" if ttfb < 200 else "needs-improvement" if ttfb < 600 else "poor",
+            }
+        
+        if "fcp" in check_metrics and perf_data.get("fcp") is not None:
+            fcp = perf_data["fcp"]
+            evaluations["fcp"] = {
+                "value": round(fcp, 1),
+                "unit": "ms",
+                "rating": "good" if fcp < 1800 else "needs-improvement" if fcp < 3000 else "poor",
+            }
+        
+        if "lcp" in check_metrics and perf_data.get("lcp") is not None:
+            lcp = perf_data["lcp"]
+            evaluations["lcp"] = {
+                "value": round(lcp, 1),
+                "unit": "ms",
+                "rating": "good" if lcp < 2500 else "needs-improvement" if lcp < 4000 else "poor",
+            }
+        
+        if "cls" in check_metrics and perf_data.get("cls") is not None:
+            cls = perf_data["cls"]
+            evaluations["cls"] = {
+                "value": round(cls, 4),
+                "unit": "",
+                "rating": "good" if cls < 0.1 else "needs-improvement" if cls < 0.25 else "poor",
+            }
+        
+        # 资源统计
+        resource_info = {}
+        if perf_data.get("resourceCount"):
+            resource_info["resource_count"] = perf_data["resourceCount"]
+        if perf_data.get("totalTransferSize"):
+            resource_info["total_transfer_kb"] = round(perf_data["totalTransferSize"] / 1024, 1)
+        
+        return json.dumps({
+            "metrics_requested": check_metrics,
+            "evaluations": evaluations,
+            "raw_data": {k: v for k, v in perf_data.items() if v is not None},
+            "resource_info": resource_info,
+            "overall_rating": _calculate_performance_rating(evaluations),
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Performance check failed: {e}"
+
+
+def _calculate_performance_rating(evaluations: dict) -> str:
+    """计算整体性能评级"""
+    ratings = [e["rating"] for e in evaluations.values() if "rating" in e]
+    if not ratings:
+        return "unknown"
+    if any(r == "poor" for r in ratings):
+        return "poor"
+    if any(r == "needs-improvement" for r in ratings):
+        return "needs-improvement"
+    return "good"
+
+
+def check_routes(
+    expected_routes: list[str] | None = None,
+    base_url: str = "http://localhost:3000",
+    check_404: bool = True,
+) -> str:
+    """验证 Next.js 路由可访问性。
+    
+    Args:
+        expected_routes: 期望的路由列表，如 ["/", "/about", "/blog/[slug]"]
+        base_url: 基础 URL
+        check_404: 是否检查 404 页面
+    
+    Returns:
+        JSON 格式的路由检查结果
+    """
+    try:
+        import requests
+        
+        ws = Path(config.WORKSPACE)
+        
+        # 如果没有提供路由，自动从 app 目录发现
+        if not expected_routes:
+            app_dir = ws / "app"
+            if app_dir.exists():
+                routes = []
+                for page_file in app_dir.rglob("page.tsx"):
+                    rel_path = page_file.relative_to(app_dir)
+                    route = "/" + str(rel_path.parent).replace("\\", "/").replace("page.tsx", "")
+                    if route.endswith("/") and route != "/":
+                        route = route[:-1]
+                    routes.append(route)
+                expected_routes = sorted(set(routes))
+            else:
+                return json.dumps({"error": "No app directory found and no routes provided"}, indent=2)
+        
+        results = []
+        for route in expected_routes:
+            url = f"{base_url.rstrip('/')}{route}"
+            try:
+                resp = requests.get(url, timeout=10, allow_redirects=False)
+                status = resp.status_code
+                
+                result = {
+                    "route": route,
+                    "url": url,
+                    "status": status,
+                    "ok": status == 200,
+                    "redirect": 300 <= status < 400,
+                }
+                
+                if status == 200:
+                    # 检查是否有实际内容（不是空白页）
+                    has_content = len(resp.text) > 500 and "<body" in resp.text.lower()
+                    result["has_content"] = has_content
+                    if not has_content:
+                        result["warning"] = "Page returned 200 but has minimal content"
+                
+                results.append(result)
+                
+            except requests.RequestException as e:
+                results.append({
+                    "route": route,
+                    "url": url,
+                    "status": "error",
+                    "ok": False,
+                    "error": str(e),
+                })
+        
+        # 检查 404 页面
+        not_found_result = None
+        if check_404:
+            try:
+                not_found_url = f"{base_url.rstrip('/')}/__nonexistent_route_12345__"
+                resp = requests.get(not_found_url, timeout=10)
+                not_found_result = {
+                    "route": "404",
+                    "url": not_found_url,
+                    "status": resp.status_code,
+                    "has_custom_404": resp.status_code == 404 and len(resp.text) > 200,
+                }
+            except Exception as e:
+                not_found_result = {"route": "404", "error": str(e)}
+        
+        ok_count = sum(1 for r in results if r.get("ok"))
+        total = len(results)
+        
+        return json.dumps({
+            "routes_tested": total,
+            "routes_ok": ok_count,
+            "routes_failed": total - ok_count,
+            "pass_rate": round(ok_count / total, 2) if total > 0 else 0,
+            "results": results,
+            "not_found_page": not_found_result,
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Route check failed: {e}"
+
+
+def mock_api(
+    endpoint: str,
+    response: dict | list | str,
+    status_code: int = 200,
+    method: str = "GET",
+    persist: bool = True,
+) -> str:
+    """Mock API 响应（通过写入本地 JSON 文件供前端读取）。
+    
+    注意：这不是真正的请求拦截，而是创建一个本地 JSON 文件，
+    前端代码需要配置为从本地文件加载数据（开发模式）。
+    
+    Args:
+        endpoint: API 端点路径，如 "/api/users"
+        response: Mock 响应数据
+        status_code: HTTP 状态码
+        method: HTTP 方法
+        persist: 是否持久化到文件
+    
+    Returns:
+        JSON 格式的 mock 配置信息
+    """
+    try:
+        ws = Path(config.WORKSPACE)
+        
+        # 创建 mock 数据目录
+        mock_dir = ws / "public" / "mock"
+        mock_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 将 endpoint 转换为文件名
+        safe_name = endpoint.strip("/").replace("/", "_").replace("[", "").replace("]", "")
+        mock_file = mock_dir / f"{safe_name}.json"
+        
+        mock_data = {
+            "endpoint": endpoint,
+            "method": method,
+            "status_code": status_code,
+            "response": response,
+            "timestamp": time.time(),
+        }
+        
+        if persist:
+            mock_file.write_text(
+                json.dumps(mock_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        
+        # 同时创建一个可直接 import 的 JS 文件
+        js_file = mock_dir / f"{safe_name}.js"
+        js_content = f"""// Auto-generated mock data for {endpoint}
+export const mockData = {json.dumps(response, ensure_ascii=False, indent=2)};
+export const mockStatus = {status_code};
+"""
+        js_file.write_text(js_content, encoding="utf-8")
+        
+        return json.dumps({
+            "status": "ok",
+            "endpoint": endpoint,
+            "mock_file": str(mock_file.relative_to(ws)),
+            "js_file": str(js_file.relative_to(ws)),
+            "usage": f"Import from '/mock/{safe_name}.js' or fetch '/mock/{safe_name}.json'",
+            "note": "For dev mode: configure your fetch to use local mock files when API is unavailable",
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return f"[error] Mock API setup failed: {e}"
+
+
 def detect_framework(workspace: str = ".") -> str:
     """自动检测项目使用的框架和技术栈。
     
@@ -2059,6 +2661,166 @@ BROWSER_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_responsive",
+            "description": (
+                "Test responsive layout across multiple viewport sizes (mobile, tablet, desktop, wide). "
+                "Takes screenshots at each breakpoint and checks for horizontal scroll (layout overflow). "
+                "Use to verify the app looks correct on all device sizes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Target URL. Default: http://localhost:5173",
+                        "default": "http://localhost:5173",
+                    },
+                    "breakpoints": {
+                        "type": "array",
+                        "description": "Custom breakpoints. Default: mobile(375x667), tablet(768x1024), desktop(1280x720), wide(1920x1080)",
+                    },
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "Force refresh. Default: true",
+                        "default": True,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_a11y",
+            "description": (
+                "Check accessibility issues: missing alt text, unlabeled inputs, buttons without text, "
+                "missing focus indicators, no semantic landmarks, heading hierarchy problems. "
+                "Use to ensure the app meets basic accessibility standards."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Target URL. Default: http://localhost:5173",
+                        "default": "http://localhost:5173",
+                    },
+                    "rules": {
+                        "type": "array",
+                        "description": "Rules to check: 'alt', 'labels', 'contrast', 'focus', 'landmarks', 'headings'. Default: all",
+                    },
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "Force refresh. Default: false",
+                        "default": False,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_performance",
+            "description": (
+                "Measure Core Web Vitals and performance metrics: FCP, LCP, CLS, TTFB, TTI. "
+                "Uses browser Performance API. Best run with fresh=true for cold load measurements. "
+                "Use to verify the app loads fast and doesn't have layout shift issues."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Target URL. Default: http://localhost:5173",
+                        "default": "http://localhost:5173",
+                    },
+                    "metrics": {
+                        "type": "array",
+                        "description": "Metrics to measure: 'fcp', 'lcp', 'cls', 'tti', 'tbt', 'ttfb'. Default: all",
+                    },
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "Force refresh for cold load. Default: true",
+                        "default": True,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_routes",
+            "description": (
+                "Verify Next.js routes are accessible. Auto-discovers routes from app/ directory "
+                "or checks provided route list. Reports HTTP status, content presence, and 404 handling. "
+                "Use for Next.js projects to ensure all pages work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expected_routes": {
+                        "type": "array",
+                        "description": "Expected routes like ['/', '/about', '/blog']. Auto-detected from app/ if not provided.",
+                    },
+                    "base_url": {
+                        "type": "string",
+                        "description": "Base URL. Default: http://localhost:3000",
+                        "default": "http://localhost:3000",
+                    },
+                    "check_404": {
+                        "type": "boolean",
+                        "description": "Check custom 404 page. Default: true",
+                        "default": True,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mock_api",
+            "description": (
+                "Create mock API response files for frontend development. Writes JSON/JS files to public/mock/ "
+                "that can be imported or fetched. Use when the app needs backend data but no API is available. "
+                "NOT a real request interceptor — frontend code must be configured to use local files in dev mode."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "endpoint": {
+                        "type": "string",
+                        "description": "API endpoint path, e.g., '/api/users'",
+                    },
+                    "response": {
+                        "type": "object",
+                        "description": "Mock response data (JSON object or array)",
+                    },
+                    "status_code": {
+                        "type": "integer",
+                        "description": "HTTP status code. Default: 200",
+                        "default": 200,
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method. Default: GET",
+                        "default": "GET",
+                    },
+                    "persist": {
+                        "type": "boolean",
+                        "description": "Save to file. Default: true",
+                        "default": True,
+                    },
+                },
+                "required": ["endpoint", "response"],
+            },
+        },
+    },
 ]
 
 TOOL_DISPATCH = {
@@ -2080,6 +2842,11 @@ TOOL_DISPATCH = {
     "check_console_logs": check_console_logs,
     "detect_framework": detect_framework,
     "run_diagnostics": run_diagnostics,
+    "check_responsive": check_responsive,
+    "check_a11y": check_a11y,
+    "check_performance": check_performance,
+    "check_routes": check_routes,
+    "mock_api": mock_api,
 }
 
 

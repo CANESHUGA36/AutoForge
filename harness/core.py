@@ -14,7 +14,7 @@ from agents import Agent
 from dashboard import Dashboard
 from eval_cache import EvalCache
 from prompts import (
-    ARCHITECT_SYSTEM, BUILDER_SYSTEM, REVIEWER_SYSTEM, JUDGE_SYSTEM, SPRINT_MASTER_SYSTEM,
+    ARCHITECT_SYSTEM, BUILDER_SYSTEM, REVIEWER_SYSTEM, SPRINT_MASTER_SYSTEM,
     refresh_prompts,
 )
 from tools_impl import TOOL_SCHEMAS, BROWSER_TOOL_SCHEMAS
@@ -75,7 +75,6 @@ class Harness:
         sprint_master_tools = CORE_TOOLS | FILE_TOOLS | {"list_files"}
         builder_tools = CORE_TOOLS | FILE_TOOLS | EXEC_TOOLS | GEN_TOOLS | META_TOOLS
         reviewer_tools = CORE_TOOLS | FILE_TOOLS | BROWSER_TOOLS | {"contract_test_run", "react_devtools_inspect", "check_console_logs", "detect_framework", "run_diagnostics", "check_responsive", "check_a11y", "check_performance", "check_routes", "mock_api"}
-        judge_tools = CORE_TOOLS | {"read_file", "write_file", "read_skill_file"}
 
         # 注入共享状态到 system prompts
         self._inject_shared_state_into_prompts()
@@ -84,7 +83,6 @@ class Harness:
         self.sprint_master = Agent("SprintMaster", self.sprint_master_prompt, TOOL_SCHEMAS, use_state=True, allowed_tools=sprint_master_tools, logger=self.log)
         self.builder = Agent("Builder", self.builder_prompt, TOOL_SCHEMAS, use_state=True, allowed_tools=builder_tools, logger=self.log)
         self.reviewer = Agent("Reviewer", self.reviewer_prompt, TOOL_SCHEMAS + BROWSER_TOOL_SCHEMAS, use_state=True, allowed_tools=reviewer_tools, logger=self.log)
-        self.judge = Agent("Judge", self.judge_prompt, TOOL_SCHEMAS, allowed_tools=judge_tools, logger=self.log)
         self.score_history: list[float] = []
         self.sprint_score_history: list[float] = []
         self.overall_score_history: list[float] = []
@@ -118,7 +116,6 @@ class Harness:
         self.sprint_master_prompt = str(SPRINT_MASTER_SYSTEM)
         self.builder_prompt = str(BUILDER_SYSTEM)
         self.reviewer_prompt = str(REVIEWER_SYSTEM)
-        self.judge_prompt = str(JUDGE_SYSTEM)
         
         # 如果有共享状态，注入到 prompts
         if hasattr(self, 'shared_state') and self.shared_state:

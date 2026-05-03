@@ -27,11 +27,28 @@ class TestReadFile:
         assert "not found" in result
 
     def test_truncates_long_files(self, set_workspace):
-        content = "x" * 50_000
-        (set_workspace / "long.txt").write_text(content, encoding="utf-8")
-        result = read_file("long.txt")
+        # Test with .html file (limit 120K) — use 150K to trigger truncation
+        content = "x" * 150_000
+        (set_workspace / "long.html").write_text(content, encoding="utf-8")
+        result = read_file("long.html")
         assert "[TRUNCATED]" in result
-        assert len(result) < 50_000
+        assert len(result) < 150_000
+
+    def test_truncates_tsx_files(self, set_workspace):
+        # Test with .tsx file (limit 80K) — use 100K to trigger truncation
+        content = "x" * 100_000
+        (set_workspace / "long.tsx").write_text(content, encoding="utf-8")
+        result = read_file("long.tsx")
+        assert "[TRUNCATED]" in result
+        assert len(result) < 100_000
+
+    def test_no_truncation_for_small_files(self, set_workspace):
+        # Small file should not be truncated
+        content = "x" * 1000
+        (set_workspace / "small.txt").write_text(content, encoding="utf-8")
+        result = read_file("small.txt")
+        assert "[TRUNCATED]" not in result
+        assert result == content
 
 
 class TestWriteFile:

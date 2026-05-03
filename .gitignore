@@ -93,3 +93,6 @@ test-playwright-click/
 .coverage
 .coverage.*
 htmlcov/
+
+# Agent instructions (local only)
+AGENTS.md
