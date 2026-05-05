@@ -123,17 +123,108 @@ Reviewer 使用多层验证（代码审查 + 契约测试 + React DevTools + 浏
 
 ### 规则 4：提交前自检（强制）
 
-写完代码后，用 `run_bash` 运行以下检查，确认没有条件渲染：
+写完代码后，运行以下检查，确认没有条件渲染：
 
 ```bash
-# 检查 React 条件渲染模式（&& 和三元在 JSX 中）
-cd {{WORKSPACE}} && grep -rn "&&\s*<" src/ || true
-cd {{WORKSPACE}} && grep -rn "?\s*<.*>\s*:" src/ || true
+# Windows: 使用 findstr 递归搜索 src 目录下的所有 tsx/jsx 文件
+cd {{WORKSPACE}} && findstr /s /r /c:"&& *<" src\*.tsx src\*.jsx 2>nul || echo "No && patterns"
+cd {{WORKSPACE}} && findstr /s /r /c:"? *<" src\*.tsx src\*.jsx 2>nul || echo "No ternary patterns"
 
 # 检查结果应该是空的。如果有输出，说明存在条件渲染，必须改为 CSS 显隐。
+# 如果 findstr 没有结果，你也可以用 read_file 直接检查你刚修改的文件。
 ```
 
 如果检查发现问题，**必须修复后再提交**。这是比构建通过更重要的硬性要求。
+
+## 设计质量要求（必须遵守）
+
+**不要写出"能用但难看"的界面。** 以下规则确保输出质量达到可展示水平：
+
+### 规则 D1：配色方案必须参考 spec.md
+编码前读取 spec.md 的 `## Design Direction` 章节。如果其中指定了配色，**严格使用**，不要自己发明。如果没有指定，使用以下安全默认值：
+- **主背景**：`bg-slate-50`（浅色）或 `bg-slate-900`（深色）
+- **卡片/面板**：`bg-white` / `bg-slate-800`
+- **主色调**：`blue-600`（按钮、链接、高亮）
+- **文字**：`slate-900`（标题）、`slate-600`（正文）、`slate-400`（辅助）
+- **边框**：`slate-200` / `slate-700`
+- **危险/错误**：`red-500`
+
+**禁止**：每个组件用不同颜色、彩虹配色、默认 HTML 蓝色链接。
+
+### 规则 D2：统一的组件风格系统
+所有可交互元素必须风格一致：
+
+| 元素 | 圆角 | 阴影 | 边框 | 内边距 |
+|------|------|------|------|--------|
+| 按钮 | `rounded-lg` | `shadow-sm` hover时`shadow-md` | `border`（ghost按钮）或无边框（solid按钮） | `px-4 py-2` |
+| 输入框 | `rounded-md` | 无 | `border border-slate-300` | `px-3 py-2` |
+| 卡片 | `rounded-xl` | `shadow-sm` | `border border-slate-200` | `p-4` |
+| 模态框 | `rounded-2xl` | `shadow-xl` | 无 | `p-6` |
+
+**禁止**：同一个页面里有的按钮圆角大、有的小、有的没圆角。
+
+### 规则 D3：交互反馈必须存在
+所有可点击/可输入的元素必须有视觉反馈：
+- **按钮**：hover 时 `brightness-110` 或 `shadow-md`，active 时 `scale-95`
+- **输入框**：focus 时 `ring-2 ring-blue-500 border-blue-500`
+- **卡片/列表项**：hover 时 `shadow-md` 或 `bg-slate-50`
+- **链接**：hover 时 `underline` 或颜色加深
+
+**禁止**：鼠标悬停时没有任何视觉变化。
+
+### 规则 D4：空状态和加载状态必须有设计感
+不要只显示"暂无数据"文字：
+
+```tsx
+// ❌ 错误 — 太简陋
+<div>暂无数据</div>
+
+// ✅ 正确 — 带图标、文字、引导操作
+<div className="flex flex-col items-center justify-center py-12 text-slate-400">
+  <InboxIcon className="w-12 h-12 mb-3" />
+  <p className="text-lg font-medium text-slate-600">还没有数据</p>
+  <p className="text-sm mt-1">点击上方按钮添加第一条记录</p>
+</div>
+```
+
+加载状态同理：使用旋转的 Spinner 图标 + "加载中..."文字，不是空白页面。
+
+### 规则 D5：统一的图标库
+全部使用 **Lucide React** 图标（`lucide-react`）。
+
+```tsx
+// ✅ 正确
+import { Plus, Trash2, Settings, Inbox } from "lucide-react";
+<Plus className="w-4 h-4" />
+
+// ❌ 错误 — 混用 emoji、SVG 字符串、不同图标库
+<span>➕</span>
+<svg>...</svg>
+```
+
+每个图标使用统一的尺寸：`w-4 h-4`（按钮内）、`w-5 h-5`（导航）、`w-6 h-6`（空状态大图标）。
+
+### 规则 D6：间距和对齐
+- 使用 Tailwind 的标准间距：`gap-4`、`space-y-2`、`p-4`、`m-2`
+- **禁止**随意写 `margin: 3px` 或 `padding: 7px`
+- 相邻模块之间至少 `gap-4` 或 `space-y-4`
+- 页面内容区域左右留白至少 `px-4` 或 `px-6`
+
+### 规则 D7：文字层级清晰
+```tsx
+// ✅ 正确的文字层级
+<h1 className="text-2xl font-bold text-slate-900">页面标题</h1>
+<h2 className="text-lg font-semibold text-slate-800">模块标题</h2>
+<p className="text-sm text-slate-600">正文描述</p>
+<span className="text-xs text-slate-400">辅助信息 / 时间戳</span>
+
+// ❌ 错误 — 所有文字一样大
+<div>标题</div>
+<div>正文</div>
+<div>备注</div>
+```
+
+---
 
 ## 你的工作范围
 1. 读取 sprint.md（你的唯一任务列表和验收标准）

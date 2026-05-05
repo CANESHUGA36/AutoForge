@@ -495,6 +495,22 @@ class Harness:
                 build_usage=build_usage, strategy=strategy
             )
 
+        # BuildGate 通过但可能有条件渲染警告 —— 注入 shared_state 让 Builder 下轮看到
+        if build_result and build_result.success:
+            payload = build_result.payload or {}
+            warnings = payload.get("conditional_render_warnings", [])
+            if warnings:
+                # 将 violations 加入 known_pitfalls，Builder 下轮自动从 prompt 注入中看到
+                violation_summary = "; ".join(warnings[:3])
+                self.shared_state.add_pitfall(
+                    pitfall=f"条件渲染使 DOM 元素不可见（BuildGate 检测到 {len(warnings)} 处）",
+                    solution=f"将 {{condition && <Element />}} 改为 <Element style={{{{display: condition ? 'block' : 'none'}}}} />。具体位置: {violation_summary}",
+                    round=round_num,
+                    agent="BuildGate",
+                )
+                self.shared_state.save(str(self.workspace))
+                self.log.info(f"[build_gate] Injected {len(warnings)} conditional render warnings into shared_state")
+
         # 检查 DevServerGate 结果
         dev_server_result = context.get("dev_server_gate")
         if dev_server_result and not dev_server_result.success:

@@ -217,6 +217,90 @@ Focus on:
 
 ---
 
+## Anti-Pattern 8: Third-Party Library Parameter Traps (Causes Runtime Crashes)
+
+### The Trap
+
+You use a third-party library (Fabric.js, Three.js, Chart.js, etc.) and pass `undefined` for an optional parameter. The library internally calls a method on that parameter → **runtime crash** → React error boundary triggers → **blank page** → Reviewer sees 0%.
+
+**Real example (Fabric.js Textbox):**
+```tsx
+// ❌ WRONG — textAlign is undefined when not passed
+new Textbox("Hello", {
+  left: 100,
+  top: 100,
+  width: 200,
+  textAlign: options.textAlign,  // undefined if options.textAlign not set!
+})
+// Fabric.js internally calls: this.textAlign.includes('justify') → CRASH
+```
+
+```tsx
+// ✅ CORRECT — always provide defaults for library parameters
+new Textbox("Hello", {
+  left: 100,
+  top: 100,
+  width: 200,
+  textAlign: options.textAlign || 'left',  // safe default
+})
+```
+
+### The Rule
+
+**When passing parameters to third-party libraries, ALWAYS provide defaults:**
+
+| Library | Common Trap | Safe Default |
+|---------|------------|-------------|
+| Fabric.js Textbox | `textAlign`, `fontFamily` undefined | `textAlign \|\| 'left'`, `fontFamily \|\| 'Arial'` |
+| Fabric.js Canvas | `backgroundColor` undefined | `backgroundColor \|\| '#ffffff'` |
+| Chart.js | `options.scales` undefined | Always provide full options object |
+| Three.js | `material.color` undefined | `new Color(0xffffff)` |
+
+**Pre-submit check for library calls:**
+1. Find all `new LibraryClass(...)` calls in your code
+2. Verify every optional parameter has a default value
+3. If a parameter comes from user input/options, add `|| defaultValue`
+
+---
+
+## Anti-Pattern 9: Canvas/Drawing Library Initialization Traps
+
+### The Trap
+
+You initialize a canvas library (Fabric.js, Paper.js, etc.) and the canvas element is not ready, or the container has zero size. The library crashes during initialization or renders nothing.
+
+**Real example:**
+```tsx
+// ❌ WRONG — canvas may not be ready when useEffect runs
+useEffect(() => {
+  const canvas = new FabricCanvas(canvasRef.current); // canvasRef.current may be null
+}, []);
+```
+
+```tsx
+// ✅ CORRECT — guard against null and zero-size
+useEffect(() => {
+  if (!canvasRef.current) return;
+  const rect = canvasRef.current.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+  
+  const canvas = new FabricCanvas(canvasRef.current, {
+    width: rect.width,
+    height: rect.height,
+  });
+}, []);
+```
+
+### The Rule
+
+**When initializing canvas/drawing libraries:**
+1. Always check ref is not null before passing to library
+2. Verify container has non-zero dimensions
+3. Set explicit width/height on the canvas element
+4. Handle resize events if container size changes
+
+---
+
 ## Best Practices Summary
 
 | Practice | Why It Matters |
@@ -237,4 +321,5 @@ If you find yourself in any of these situations:
 - >5 iterations on the same bug → **Declare PIVOT strategy**
 - >10 iterations on browser_check → **Stop, submit, move on**
 - >40 total iterations → **Stop adding features, only fix crashes**
+- Runtime crash on third-party library → **Check ALL library parameters have defaults**
 - Build passes but you're still "verifying" → **SUBMIT NOW**

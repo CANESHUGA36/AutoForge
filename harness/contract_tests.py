@@ -180,6 +180,10 @@ class ContractTestSuite:
             return "drawing"
         elif any(kw in dl for kw in ["text", "font", "typography"]):
             return "text"
+        elif any(kw in dl for kw in ["canvas", "fabric", "konva", "paper", "pixi", "three"]):
+            return "canvas_lib"
+        elif any(kw in dl for kw in ["chart", "graph", "plot", "diagram", "visualization", "d3", "chartjs", "recharts"]):
+            return "chart_lib"
         else:
             return "functionality"
 
@@ -301,6 +305,8 @@ class ContractTestSuite:
             "data": self._generate_data_test,
             "performance": self._generate_performance_test,
             "functionality": self._generate_functionality_test,
+            "canvas_lib": self._generate_canvas_lib_test,
+            "chart_lib": self._generate_chart_lib_test,
         }
         generator = generators.get(criterion.validation_type)
         if not generator:
@@ -577,6 +583,140 @@ class ContractTestSuite:
             name=f"perf_{criterion.id}",
             test_fn=test_fn,
             weight=0.5  # 性能测试权重较低
+        )
+
+    def _generate_canvas_lib_test(self, criterion: ContractCriterion) -> ContractTest:
+        """生成 Canvas 库（Fabric.js 等）专用测试 —— 检测常见的运行时崩溃陷阱"""
+        def test_fn() -> TestResult:
+            keywords = ["canvas", "fabric", "konva", "paper", "pixi", "draw", "shape", "text", "element"] + self._extract_keywords(criterion.description)
+            files = self._find_component_files(keywords)
+
+            if not files:
+                return TestResult(
+                    passed=False, score=0,
+                    details="No canvas component found",
+                    evidence={}
+                )
+
+            score = 0
+            evidence = {}
+            warnings = []
+
+            for f, source in files[:3]:
+                # 检查 Fabric.js Textbox/IText 是否有 textAlign 默认值
+                if "new Textbox(" in source or "new IText(" in source:
+                    if "textAlign" in source:
+                        # 检查是否有默认值
+                        if "||" in source and "textAlign" in source:
+                            score += 30
+                            evidence["textalign_safe"] = True
+                        else:
+                            warnings.append(f"{f.name}: Textbox/IText may have undefined textAlign — Fabric.js will crash")
+                    else:
+                        warnings.append(f"{f.name}: Textbox/IText missing textAlign — Fabric.js will crash on initDimensions()")
+
+                # 检查 Fabric.js Canvas 初始化是否有 ref 检查
+                if "new FabricCanvas(" in source or "new Canvas(" in source:
+                    if "ref.current" in source and ("if (!" in source or "if (" in source):
+                        score += 30
+                        evidence["canvas_ref_check"] = True
+                    else:
+                        warnings.append(f"{f.name}: Canvas initialization without null check — may crash if ref not ready")
+
+                # 检查是否有 useEffect 依赖数组（防止无限重渲染）
+                if "useEffect" in source and "[]" in source:
+                    score += 20
+                    evidence["useeffect_mount"] = True
+
+                # 检查是否有 cleanup（防止内存泄漏）
+                if "return () =>" in source and ("dispose" in source or "remove" in source or "cleanup" in source):
+                    score += 20
+                    evidence["cleanup"] = True
+
+            # 如果没有找到 canvas 相关代码，但有关键词匹配，给基础分
+            if score == 0 and files:
+                score = 20
+                evidence["canvas_files_found"] = [str(f.name) for f, _ in files[:3]]
+
+            # 如果有严重警告，降低分数
+            if warnings:
+                score = max(0, score - len(warnings) * 25)
+                evidence["warnings"] = warnings
+
+            score = min(score, 100)
+            return TestResult(
+                passed=score >= 50 and not warnings,
+                score=score,
+                details=f"Canvas lib check: score={score}, warnings={len(warnings)}",
+                evidence=evidence
+            )
+        return ContractTest(
+            criterion_id=criterion.id,
+            name=f"canvas_{criterion.id}",
+            test_fn=test_fn,
+            weight=1.0
+        )
+
+    def _generate_chart_lib_test(self, criterion: ContractCriterion) -> ContractTest:
+        """生成图表库（Chart.js, D3 等）专用测试"""
+        def test_fn() -> TestResult:
+            keywords = ["chart", "graph", "plot", "d3", "chartjs", "recharts", "visualization"] + self._extract_keywords(criterion.description)
+            files = self._find_component_files(keywords)
+
+            if not files:
+                return TestResult(
+                    passed=False, score=0,
+                    details="No chart component found",
+                    evidence={}
+                )
+
+            score = 0
+            evidence = {}
+            warnings = []
+
+            for f, source in files[:3]:
+                # 检查是否有 ref 用于 canvas 容器
+                if "useRef" in source:
+                    score += 30
+                    evidence["has_ref"] = True
+
+                # 检查是否有 options/data 默认值
+                if "options" in source.lower():
+                    if "||" in source or "??" in source or "default" in source.lower():
+                        score += 30
+                        evidence["options_safe"] = True
+                    else:
+                        warnings.append(f"{f.name}: Chart options may be undefined — may crash on initialization")
+
+                # 检查是否有 resize 处理
+                if "resize" in source.lower() or "ResizeObserver" in source:
+                    score += 20
+                    evidence["resize_handler"] = True
+
+                # 检查是否有 cleanup
+                if "return () =>" in source and ("destroy" in source or "dispose" in source):
+                    score += 20
+                    evidence["cleanup"] = True
+
+            if score == 0 and files:
+                score = 20
+
+            if warnings:
+                score = max(0, score - len(warnings) * 30)
+                evidence["warnings"] = warnings
+
+            score = min(score, 100)
+            return TestResult(
+                passed=score >= 50 and not warnings,
+                score=score,
+                details=f"Chart lib check: score={score}, warnings={len(warnings)}",
+                evidence=evidence
+            )
+        return ContractTest(
+            criterion_id=criterion.id,
+            name=f"chart_{criterion.id}",
+            test_fn=test_fn,
+            weight=1.0
         )
 
     def _generate_functionality_test(self, criterion: ContractCriterion) -> ContractTest:
