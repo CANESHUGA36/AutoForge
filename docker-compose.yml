@@ -21,8 +21,12 @@ services:
       - ./tools:/app/tools:ro
       - ./config.py:/app/config.py:ro
       - ./agents.py:/app/agents.py:ro
+      - ./context.py:/app/context.py:ro
       - ./tools_impl.py:/app/tools_impl.py:ro
       - ./prompts.py:/app/prompts.py:ro
       - ./docs:/app/docs:ro
+    # Keep container alive and prevent auto-exit
+    tty: true
+    stdin_open: true
     # Default command - override with: docker compose run autoforge python run.py "your prompt"
     command: ["python", "run.py"]

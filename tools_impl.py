@@ -577,11 +577,8 @@ def run_bash(command: str, timeout: int = 900) -> str:
 
 
 def _get_minimax_base_url() -> str:
-    """"""
-    base = getattr(config, "BASE_URL", "")
-    if "minimaxi.com" in base:
-        return "https://api.minimaxi.com"
-    return "https://api.minimax.io"
+    """获取 MiniMax API 基础 URL。优先使用 MINIMAX_BASE_URL，避免与文本模型的 BASE_URL 冲突。"""
+    return getattr(config, "MINIMAX_BASE_URL", "https://api.minimaxi.com")
 
 def generate_image(
 
@@ -727,11 +724,11 @@ def search_web(query: str, limit: int = 5) -> str:
     """"""
     try:
 
-        api_key = (config.API_KEY or "").strip()
+        api_key = (config.MINIMAX_API_KEY or "").strip()
 
         if not api_key:
 
-            return "[error] API_KEY not set; cannot perform web search"
+            return "[error] MINIMAX_API_KEY not set; cannot perform web search"
 
         if not query or not query.strip():
 
@@ -819,11 +816,11 @@ def analyze_image(image_path: str, prompt: str = "Describe this image in detail"
     """"""
     try:
 
-        api_key = (config.API_KEY or "").strip()
+        api_key = (config.MINIMAX_API_KEY or "").strip()
 
         if not api_key:
 
-            return "[error] API_KEY not set; cannot analyze image"
+            return "[error] MINIMAX_API_KEY not set; cannot analyze image"
 
         if not image_path or not image_path.strip():
 

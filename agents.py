@@ -162,7 +162,7 @@ class Agent:
                     model=config.MODEL,
                     messages=messages,
                     tools=self.tools,
-                    extra_body={"reasoning": {"type": "disabled"}},
+                    max_tokens=8192,
                 )
             except Exception as e:
                 run_log.final_status = "llm_error"
@@ -202,6 +202,7 @@ class Agent:
                 "content": message.content,
                 "tool_calls": [tc.model_dump() for tc in message.tool_calls] if message.tool_calls else []
             }
+            # DeepSeek 等 reasoning 模型要求把 reasoning_content 传回
             reasoning_content = getattr(message, "reasoning_content", None)
             if reasoning_content:
                 assistant_msg["reasoning_content"] = reasoning_content
@@ -374,7 +375,7 @@ class Agent:
             return context.compact_messages(messages, self._llm_call_simple, self.name.lower())
 
         # 策略3: WorkspaceState 分层（P2）—— 用状态摘要替代工具返回
-        elif self.use_state and self._workspace_state is not None and token_count > config.COMPRESS_THRESHOLD * 0.6:
+        elif self.use_state and self._workspace_state is not None and token_count > config.COMPRESS_THRESHOLD * 0.8:
             self._log.info(
                 f"[{self.name}] State injection triggered ({token_count} tokens) | "
                 f"replacing tool returns with state summary"
@@ -393,7 +394,7 @@ class Agent:
                 model=config.MODEL,
                 messages=messages,
                 temperature=0.3,
-                extra_body={"reasoning": {"type": "disabled"}},
+                max_tokens=4096,
             )
             return response.choices[0].message.content or ""
         except Exception as e:

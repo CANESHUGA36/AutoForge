@@ -83,6 +83,16 @@ grep -n "data-testid" src/components/Canvas.tsx
 3. 事件处理函数是否非空（onClick/onKeyDown/onChange 绑定了实际逻辑）
 4. **条件渲染方式**：CSS 显隐（✅）还是条件渲染（❌）
 5. 组内功能之间的接口是否兼容
+6. **设计一致性**（代码层面验证）：
+   - 同一页面内所有按钮圆角/阴影/边框风格是否一致（grep `rounded-*` / `shadow-*`）
+   - 配色是否遵循 Design Direction（统计 `bg-` / `text-` / `border-` 的主色使用次数）
+   - 空状态是否有 Lucide 图标 + 引导文字（不是纯文本"暂无数据"）
+   - 图标是否全部来自 `lucide-react`（无 emoji、无内联 SVG）
+7. **轻量级回归检查**（如果当前大组 > G1）：
+   - 读取前 1-2 个大组的关键入口文件（如 App.tsx、Layout、Store）
+   - 确认之前大组的核心代码仍然存在，未被删除/注释/破坏
+   - 确认之前大组的 data-testid 仍然保留
+   - 如果有破坏，标记为 **REGRESSION_BUG**（视同 CRITICAL_BUG 处理）
 
 **代码审查通过标准：**
 ```

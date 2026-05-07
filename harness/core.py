@@ -36,7 +36,7 @@ from harness.strategy import parse_strategy
 from harness.events import EventBus
 from harness.pipeline import PipelineRunner
 from harness.stages import (
-    PreBuildGateStage, BuildGateStage, DevServerGateStage,
+    PreBuildGateStage, BuildGateStage, DesignLintStage, DevServerGateStage,
     ScreenshotGateStage, GitCommitStage,
 )
 logging.basicConfig(
@@ -475,6 +475,7 @@ class Harness:
         self.log.info("[pipeline] Phase 2 — Validation & commit")
         runner = PipelineRunner(self.workspace, self.event_bus)
         runner.add_stage(BuildGateStage)
+        runner.add_stage(DesignLintStage)
         runner.add_stage(DevServerGateStage)
         runner.add_stage(ScreenshotGateStage)
         runner.add_stage(GitCommitStage)
@@ -1629,7 +1630,16 @@ class Harness:
             f"2. Look for: broken interactions, missing elements, console errors, "
             f"   visual glitches, responsive issues, accessibility problems.\n"
             f"3. Check D/T (Design/Technical) criteria that were skipped earlier.\n"
-            f"4. Report ONLY real bugs and regressions — do not re-test passing features.\n"
+            f"4. **全局设计一致性检查**：\n"
+            f"   - 检查所有组件文件中按钮圆角/阴影/边框是否统一\n"
+            f"   - 检查配色方案是否遵循 Design Direction（统计主色使用次数）\n"
+            f"   - 检查空状态是否都有 Lucide 图标 + 引导文字（不是纯文本）\n"
+            f"   - 检查 Lucide 图标使用一致性（无 emoji、无内联 SVG）\n"
+            f"5. **跨大组交互验证**：\n"
+            f"   - G1 的状态管理是否被 G2/G3 正确消费\n"
+            f"   - 路由/导航是否覆盖所有已实现的大组\n"
+            f"   - 全局样式（Tailwind config）是否被所有组件正确引用\n"
+            f"6. Report ONLY real bugs and regressions — do not re-test passing features.\n"
             f"Limit: 30 iterations max."
         )
         

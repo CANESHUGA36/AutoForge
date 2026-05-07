@@ -190,6 +190,61 @@ class BuildGateStage(PipelineStage):
         )
 
 
+class DesignLintStage(PipelineStage):
+    """设计静态检查：正则匹配代码中的 Tailwind 类名一致性（不阻塞，只报告）"""
+    name = "design_lint"
+    timeout_seconds = 60
+
+    def run(self) -> StageResult:
+        import re
+
+        pkg = self.workspace / "package.json"
+        if not pkg.exists():
+            return StageResult(success=True, message="Pure HTML project — no design lint needed")
+
+        jsx_files = list(self.workspace.rglob("*.tsx")) + list(self.workspace.rglob("*.jsx"))
+        jsx_files = [f for f in jsx_files if "node_modules" not in str(f) and ".next" not in str(f) and ".vite" not in str(f)]
+
+        issues = []
+        for f in jsx_files:
+            try:
+                content = f.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            rel = f.relative_to(self.workspace)
+
+            # 检查按钮圆角一致性
+            buttons = re.findall(r'className="([^"]*button[^"]*)"', content)
+            buttons += re.findall(r"className='([^']*button[^']*)'", content)
+            rounded_styles = set()
+            for btn in buttons:
+                if "rounded-lg" in btn:
+                    rounded_styles.add("rounded-lg")
+                elif "rounded-md" in btn:
+                    rounded_styles.add("rounded-md")
+                elif "rounded" in btn:
+                    rounded_styles.add("rounded")
+            if len(rounded_styles) > 1:
+                issues.append(f"  {rel}: 按钮圆角不一致 {rounded_styles}")
+
+            # 检查是否混用 emoji / 非 Lucide SVG
+            if re.search(r'[^\w]svg[^\w]', content.lower()) and "lucide" not in content.lower():
+                issues.append(f"  {rel}: 可能使用了非 Lucide 图标（发现 svg 且无 lucide 导入）")
+
+            # 检查空状态是否太简陋
+            if '"暂无数据"' in content or "'暂无数据'" in content or '"No data"' in content:
+                issues.append(f"  {rel}: 空状态使用纯文本，应改为图标+引导文字的占位 UI")
+
+        if issues:
+            return StageResult(
+                success=True,  # 不阻塞构建
+                message=f"Design lint: {len(issues)} style issue(s) detected",
+                payload={"design_issues": issues[:20]},
+            )
+        return StageResult(success=True, message="Design lint passed")
+
+
 class DevServerGateStage(PipelineStage):
     """Dev Server 检查阶段：确保服务器可访问。
     

@@ -28,13 +28,15 @@ _load_dotenv()
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 # Generate Image API key — used for image-01 generation.
 # Falls back to the chat API key when unset.
-GENERATE_IMAGE_API_KEY = os.environ.get("GENERATE_IMAGE_API_KEY", "") or os.environ.get("MINIMAX_API_KEY", "") or API_KEY
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "") or API_KEY
+MINIMAX_BASE_URL = os.environ.get("MINIMAX_BASE_URL", "https://api.minimaxi.com")
+GENERATE_IMAGE_API_KEY = os.environ.get("GENERATE_IMAGE_API_KEY", "") or MINIMAX_API_KEY
 BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 MODEL = os.environ.get("HARNESS_MODEL", "gpt-4o")
 
-# Token 阈值 (200K context model — raise to keep more history before state injection)
-COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", "180000"))
-RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "200000"))
+# Token 阈值 (1M context model — DeepSeek)
+COMPRESS_THRESHOLD = int(os.environ.get("COMPRESS_THRESHOLD", "600000"))
+RESET_THRESHOLD = int(os.environ.get("RESET_THRESHOLD", "900000"))
 
 # Harness 循环
 MAX_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "0"))  # 0 = 动态计算
@@ -85,9 +87,10 @@ AGENT_ITERATION_LIMITS = {
     "architect": int(os.environ.get("MAX_ITERATIONS_ARCHITECT", "30")),
     "sprint_master": int(os.environ.get("MAX_ITERATIONS_SPRINT_MASTER", "15")),
     # 大组模式：每个大组包含更多功能，Builder 需要更多迭代
-    "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "80")),
+    # 1M 上下文支持更多轮次
+    "builder": int(os.environ.get("MAX_ITERATIONS_BUILDER", "120")),
     # Reviewer 自主测试，需要足够预算完成深度验证
-    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "50")),
+    "reviewer": int(os.environ.get("MAX_ITERATIONS_REVIEWER", "80")),
     # Judge 已移除 —— 大组模式下 Reviewer 直接给出判定
 }
 
