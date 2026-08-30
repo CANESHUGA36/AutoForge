@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>姓名 · AI 应用开发 / Agent · 2026秋招</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=Noto+Sans+SC:wght@400;500&family=Noto+Serif+SC:wght@600;700&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!--
+    第一版 PDF 草稿。带虚线下划线的为待填项（class="ph"）。
+    实习三条成果与 AutoForge 为占位文案，实现细节补齐后只替换句子、不改结构。
+  -->
+  <article class="page">
+    <header class="mast">
+      <div class="mast-left">
+        <h1><span class="ph">姓名</span></h1>
+        <p class="tagline">把业务需求做成可移交的 AI 系统，并用多 Agent 流水线交付可运行应用。</p>
+        <p class="contact">
+          <span class="ph">电话</span>
+          <i></i>
+          <a href="mailto:2292932127@qq.com">2292932127@qq.com</a>
+          <i></i>
+          <a href="https://github.com/CANESHUGA36">github.com/CANESHUGA36</a>
+        </p>
+      </div>
+      <div class="mast-right">
+        <p class="season">2026 秋招</p>
+        <p class="intent">意向 <em>AI 应用开发 / Agent</em></p>
+        <p class="where"><span class="ph">城市</span> · <span class="ph">到岗时间</span></p>
+      </div>
+    </header>
+
+    <section class="sec edu">
+      <div class="sec-head">
+        <span class="num">01</span>
+        <h2>教育</h2>
+        <span class="rule"></span>
+      </div>
+      <div class="edu-row">
+        <div class="edu-main">
+          <strong class="ph">学校名称</strong>
+          <span class="dot">·</span>
+          <span class="ph">学历</span>
+          <span class="dot">·</span>
+          <span class="ph">专业</span>
+        </div>
+        <time class="ph">2022.09 — 2026.06</time>
+      </div>
+    </section>
+
+    <section class="sec intern">
+      <div class="sec-head">
+        <span class="num">02</span>
+        <h2>实习经历</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="job-head">
+        <div class="job-title">
+          <strong class="ph">公司名称</strong>
+          <span class="role">AI 应用开发实习</span>
+        </div>
+        <time class="ph">2025.xx — 2026.xx</time>
+      </div>
+      <p class="job-lead">
+        同时承接产品、市场、客服三条业务线的 LLM 落地：做成评分与题库、活动解析、反馈打标，并完成移交。
+      </p>
+
+      <ol class="lanes">
+        <li>
+          <div class="lane-meta">
+            <span class="org">产品组</span>
+            <span class="method">PROMPT ENG</span>
+          </div>
+          <div class="lane-body">
+            <h3>猜词游戏 <span>LLM 评分与题库流水线</span></h3>
+            <p class="chain">CN / 海外华人 / KR&ensp;·&ensp;评分 prompt&ensp;·&ensp;已移交同事使用</p>
+            <ul>
+              <li>设计猜词结果的多档评分 prompt，把判定收成稳定、可复用的档位，供游戏侧直接调用。</li>
+              <li>搭建分市场题库生成流水线，覆盖大陆、海外华人、韩版三套题库，并完成交接。</li>
+            </ul>
+          </div>
+        </li>
+        <li>
+          <div class="lane-meta">
+            <span class="org">市场组</span>
+            <span class="method">SPEC CODING</span>
+          </div>
+          <div class="lane-body">
+            <h3>竞品活动规则解析 <span>截图拼接 → LLM → 钉钉表</span></h3>
+            <p class="chain">拼接算法&ensp;→&ensp;LLM 初提取&ensp;→&ensp;钉钉表格&ensp;→&ensp;表内 AI 精解析</p>
+            <ul>
+              <li>实现活动页截图拼接，将碎片规则图还原为可进入模型的完整画面（Agent 辅助设计与调试）。</li>
+              <li>先抽取活动标题、时间范围与内容摘要写入钉钉表，再交表内 AI 完成细则解析。</li>
+            </ul>
+          </div>
+        </li>
+        <li>
+          <div class="lane-meta">
+            <span class="org">客服组</span>
+            <span class="method">AGENT CLS</span>
+          </div>
+          <div class="lane-body">
+            <h3>用户反馈机器人 <span>自动打标分类</span></h3>
+            <p class="chain">人工已分类工单&ensp;→&ensp;索引库&ensp;→&ensp;BGE + TF-IDF</p>
+            <ul>
+              <li>以客服已完成「问题类型」标注的工单建立索引库，作为后续自动分类的对照信号。</li>
+              <li>结合 BGE 语义向量与 TF-IDF，对反馈机器人会话自动打标，降低二次人工分拣。</li>
+            </ul>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="sec project">
+      <div class="sec-head">
+        <span class="num">03</span>
+        <h2>个人项目</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="job-head">
+        <div class="job-title">
+          <strong>AutoForge</strong>
+          <span class="role">多 Agent 前端自动构建框架</span>
+        </div>
+        <a class="proj-link" href="https://github.com/CANESHUGA36/AutoForge">github.com/CANESHUGA36/AutoForge</a>
+      </div>
+      <p class="job-lead">
+        自然语言需求 → Architect / Sprint / Builder / Reviewer → 带构建与设计门禁的可运行 Web 应用。
+      </p>
+
+      <div class="pipe" aria-label="AutoForge 流水线">
+        <div class="pipe-step">
+          <b>Architect</b>
+          <span>规格与方案</span>
+        </div>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <div class="pipe-step">
+          <b>SprintMaster</b>
+          <span>任务切片</span>
+        </div>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <div class="pipe-step">
+          <b>Builder</b>
+          <span>编码 + 门禁</span>
+        </div>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <div class="pipe-step">
+          <b>Reviewer</b>
+          <span>评审回灌</span>
+        </div>
+      </div>
+      <p class="pipe-sub">Pipeline&ensp;Build Gate · Design Lint · DevServer · Screenshot · Contract Test</p>
+
+      <ul class="proj-points">
+        <li>设计四 Agent 分轮协作：从需求写出 spec/contract，再按功能组迭代编码，直到可演示。</li>
+        <li>流水线卡住构建、设计约束（D1–D7）、开发服务器与截图；用 data-testid 契约测试做静态验收。</li>
+        <li>Docker 化运行，支持中断后按 workspace 恢复，把「能跑一次」做成可重复交付。</li>
+      </ul>
+      <p class="stack-line">Python · React / Vite · Playwright · Docker</p>
+    </section>
+
+    <section class="sec stack">
+      <div class="sec-head">
+        <span class="num">04</span>
+        <h2>技术栈</h2>
+        <span class="rule"></span>
+      </div>
+      <ul class="stack-rows">
+        <li>
+          <span class="k">LLM / AGENT</span>
+          <span class="v">Prompt Engineering · 多步抽取 · BGE · TF-IDF · 索引打标 · 多 Agent 协作</span>
+        </li>
+        <li>
+          <span class="k">ENGINEERING</span>
+          <span class="v">Python · 题库流水线 · 截图拼接 · 索引库 · Docker · 业务移交</span>
+        </li>
+        <li>
+          <span class="k">FULLSTACK</span>
+          <span class="v">React · Vite · Playwright · 钉钉表格 / 开放能力 · 契约测试</span>
+        </li>
+      </ul>
+    </section>
+
+    <footer class="colophon">
+      <span>pipeline&ensp;architect › sprint › builder › reviewer</span>
+      <span>v1 草稿 · A4</span>
+    </footer>
+  </article>
+</body>
+</html>

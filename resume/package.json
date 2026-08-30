@@ -1,0 +1,11 @@
+{
+  "name": "resume-pdf-draft",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pdf": "node export.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.15.0"
+  }
+}
