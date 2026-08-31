@@ -254,7 +254,7 @@ em {
   grid-template-columns: 26mm 1fr;
   gap: 2mm 4.5mm;
   position: relative;
-  padding: 2.2mm 0 2.4mm;
+  padding: 2mm 0 2.2mm;
 }
 
 .lanes > li + li {

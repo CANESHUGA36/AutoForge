@@ -108,11 +108,11 @@
             <span class="method">AGENT CLS</span>
           </div>
           <div class="lane-body">
-            <h3>用户反馈机器人 <span>自动打标分类</span></h3>
-            <p class="chain">人工已分类工单&ensp;→&ensp;索引库&ensp;→&ensp;BGE + TF-IDF</p>
+            <h3>用户反馈机器人 <span>一 / 二级自动打标</span></h3>
+            <p class="chain">学习库&ensp;→&ensp;一/二级判决&ensp;→&ensp;测试集&ensp;→&ensp;会话写回审批</p>
             <ul>
-              <li>以客服已完成「问题类型」标注的工单建立索引库，作为后续自动分类的对照信号。</li>
-              <li>结合 BGE 语义向量与 TF-IDF，对反馈机器人会话自动打标，降低二次人工分拣。</li>
+              <li>导入已标注工单与分类作学习库；用判决条件选定一、二级标签，在测试集上统计命中率。</li>
+              <li>再拉机器人真实会话验证，写回工单字段并走人工审批，而不是离线分完即止。</li>
             </ul>
           </div>
         </li>
