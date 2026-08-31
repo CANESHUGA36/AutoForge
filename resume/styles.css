@@ -51,33 +51,39 @@ em {
   position: relative;
   width: 210mm;
   height: 297mm;
-  padding: 13.5mm 15mm 12mm;
+  /* border-top instead of a full-bleed ::before: Chrome PDF clips
+     overflowing layers and can tick the page corners. */
+  border-top: 3.6pt solid var(--red);
+  padding: 12.2mm 15mm 12mm;
   background: var(--paper);
   overflow: hidden;
   -webkit-print-color-adjust: exact;
   print-color-adjust: exact;
 }
 
-.page::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3.6pt;
-  background: var(--red);
-}
-
 /* —— masthead —— */
 
 .mast {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr 25mm;
   gap: 6.5mm;
   align-items: stretch;
   padding-bottom: 3.6mm;
   border-bottom: 0.7pt solid var(--ink);
-  box-shadow: 0 2.2pt 0 0 var(--paper), 0 3pt 0 0 var(--ink);
+}
+
+/* Second rule as a 0.7pt bar — not box-shadow. Chrome print-to-PDF
+   implements 0-blur shadows as an even-odd clip of the whole box,
+   which PDF viewers rasterize as vertical hairlines on both sides. */
+.mast::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2.9pt;
+  height: 0.7pt;
+  background: var(--ink);
 }
 
 .mast-left {
