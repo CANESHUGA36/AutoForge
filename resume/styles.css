@@ -74,25 +74,31 @@ em {
   display: grid;
   grid-template-columns: 1fr 25mm;
   gap: 6.5mm;
-  align-items: start;
-  padding-bottom: 3.8mm;
+  align-items: stretch;
+  padding-bottom: 3.6mm;
   border-bottom: 0.7pt solid var(--ink);
   box-shadow: 0 2.2pt 0 0 var(--paper), 0 3pt 0 0 var(--ink);
 }
 
+.mast-left {
+  display: flex;
+  flex-direction: column;
+  min-height: 35mm;
+  padding-top: 0.2mm;
+}
+
 .mast-left h1 {
   font-family: var(--serif);
-  font-size: 26pt;
+  font-size: 28pt;
   font-weight: 700;
   line-height: 1.05;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.12em;
 }
 
 .tagline {
-  margin-top: 2.6mm;
-  max-width: 132mm;
+  margin-top: 2.4mm;
   color: var(--ink-2);
-  font-size: 9.4pt;
+  font-size: 10pt;
   line-height: 1.5;
 }
 
@@ -101,11 +107,13 @@ em {
   flex-wrap: wrap;
   align-items: center;
   gap: 0;
-  margin-top: 2.8mm;
+  margin-top: auto;
+  padding-top: 2mm;
   font-family: var(--mono);
-  font-size: 7.4pt;
+  font-size: 7.5pt;
   letter-spacing: 0.01em;
   color: var(--muted);
+  border-top: 0.4pt solid var(--line);
 }
 
 .contact i {
@@ -142,12 +150,20 @@ em {
   margin-top: 4.4mm;
 }
 
+.sec.edu {
+  margin-top: 3.6mm;
+}
+
 .sec-head {
   display: grid;
   grid-template-columns: 9mm auto 1fr;
   gap: 2.4mm;
   align-items: baseline;
   margin-bottom: 2.6mm;
+}
+
+.sec.edu .sec-head {
+  margin-bottom: 1.8mm;
 }
 
 .num {
