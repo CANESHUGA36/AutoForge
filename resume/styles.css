@@ -487,5 +487,7 @@ em {
 
   .page {
     box-shadow: none;
+    /* Clip paths from overflow:hidden show up as hairlines in some PDF viewers. */
+    overflow: visible;
   }
 }
