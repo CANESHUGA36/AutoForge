@@ -15,7 +15,7 @@
 <body>
   <!--
     已填：姓名、电话、学历专业、英语六级、在校与实习公司/时间/职位。
-    客服组按 P1 已完成写：工单学习 + 约束打标 + 全量评测。不写七鱼接线、不回写工单。
+    客服组按 P1 已完成写。Agent：给一条诉求选树上的一对；按相似工单 + 一级 Top-3 收窄名单，票够且一级一致才写入。
   -->
   <article class="page">
     <header class="mast">
@@ -109,10 +109,10 @@
           </div>
           <div class="lane-body">
             <h3>会话打标 <span>用工单学一 / 二级</span></h3>
-            <p class="chain">工单教材&ensp;→&ensp;树上选一对&ensp;·&ensp;全量 2308&ensp;·&ensp;pair 70.5%&ensp;·&ensp;一级 85%&ensp;·&ensp;已完成</p>
+            <p class="chain">检索 + 一级 Top-3&ensp;→&ensp;Agent 选对&ensp;→&ensp;write/review/skip&ensp;·&ensp;pair 70.5%&ensp;·&ensp;一级 85%&ensp;·&ensp;已完成</p>
             <ul>
-              <li>用工单人工一/二级做成打标器：约 1.2 万条映射到 20 个一级 / 510 对；只输出树上的标签，不回写工单。</li>
-              <li>检索相似工单并收窄枚举，约束模型选一对；低置信复核，交付工单打标接口。</li>
+              <li>约 1.2 万条已标工单当教材。Agent 给一条诉求在 20 个一级 / 510 对里选出树上的一对，不回写工单。</li>
+              <li>评判看相似工单和一级 Top-3：票够且一级一致才写入，否则复核或跳过。</li>
             </ul>
           </div>
         </li>
