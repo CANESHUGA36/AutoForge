@@ -160,6 +160,10 @@ em {
   margin-top: 3.6mm;
 }
 
+.sec.stack {
+  margin-top: 3.6mm;
+}
+
 .sec-head {
   display: grid;
   grid-template-columns: 9mm auto 1fr;
@@ -260,7 +264,7 @@ em {
   grid-template-columns: 26mm 1fr;
   gap: 2mm 4.5mm;
   position: relative;
-  padding: 2mm 0 2.2mm;
+  padding: 1.7mm 0 1.85mm;
 }
 
 .lanes > li + li {
@@ -441,7 +445,7 @@ em {
   position: absolute;
   left: 15mm;
   right: 15mm;
-  bottom: 8mm;
+  bottom: 7mm;
   display: flex;
   justify-content: space-between;
   font-family: var(--mono);
