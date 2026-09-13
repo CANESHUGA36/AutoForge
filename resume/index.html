@@ -29,6 +29,8 @@
     ② 题库工厂（word-boom-question-bank）：21 槽、硬拦改槽、简/当地繁/韩、工作台。
     不写已交付 5000、点踩下降%、LangChain、双 Agent 上线给玩家、网关 Key。
     38%、37%、3400s、622 对人标、事故窗留给面试，一条 bullet 只埋一个钩。
+    AutoForge：构建与 DevServer 才硬卡住；DesignLint/截图不阻断。不要写 20 文件/133 用例（本仓对不上）、不要用画板当 punchline。
+    压缩口径：摘要 → checkpoint → 超阈值重置。工具越权调用是运行时拒绝。
   -->
   <article class="page">
     <header class="mast">
@@ -174,9 +176,9 @@
       <p class="pipe-sub">Pipeline&ensp;Build Gate · Design Lint · DevServer · Screenshot · Contract Test</p>
 
       <ul class="proj-points">
-        <li>四 Agent 分轮协作：Function Calling 注册工具并按角色隔离，按功能组从 spec 迭代到可演示。</li>
-        <li>Pipeline 卡住构建、设计约束、DevServer 与截图；接 Playwright MCP，契约测试 20 文件 / 133 用例。</li>
-        <li>三层上下文压缩延长有效轮次；Docker 支持中断恢复。画板、简历页均过构建与截图门禁。</li>
+        <li>四 Agent 分轮：工具按角色注册，运行时拒绝越权调用；按功能组从 spec 迭代，门禁不过不进入下一组。</li>
+        <li>构建与 DevServer 硬卡住；设计检查与截图存档。接 Playwright MCP 做浏览器验收，契约测试先扫 data-testid。</li>
+        <li>上下文先摘要再 checkpoint，超阈值才重置；Docker 可中断恢复，不必从头再跑。</li>
       </ul>
       <p class="stack-line">Python · Function Calling · MCP · Playwright · Docker</p>
     </section>
