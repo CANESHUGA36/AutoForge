@@ -38,7 +38,7 @@
     <header class="mast">
       <div class="mast-left">
         <h1>彭杨稀</h1>
-        <p class="tagline">把业务需求做成可移交的 AI 系统，<br />用多 Agent 流水线把自然语言做成可运行应用。</p>
+        <p class="tagline">评分、出题、拼长图、打标都接到同事能用的流程里，<br />课外用四个 Agent 把一句话需求做成能打开的网页。</p>
         <p class="contact">
           <a href="tel:17318440736">173-1844-0736</a>
           <i></i>
@@ -87,7 +87,7 @@
         <time>2026.06 — 2026.09</time>
       </div>
       <p class="job-lead">
-        同时承接产品、市场、客服三条业务线：做成评分与题库工厂、活动页拼长图工作流，以及用工单学习、可写回的会话打标。
+        同时接产品、市场、客服：猜词评分和 21 槽出题、活动页拼长图、用工单做会话打标并写回七鱼。
       </p>
 
       <ol class="lanes">
@@ -100,8 +100,8 @@
             <h3>密语炸弹 <span>评分 LLM · 题库工厂</span></h3>
             <p class="chain">只吃两词&ensp;·&ensp;21 槽&ensp;·&ensp;生成→校验→改槽&ensp;·&ensp;已移交</p>
             <ul>
-              <li>从 5042 词证伪「点踩=过严」：实时评分只吃答案与猜测；词对评测与消融锁成口语同义满分、同领域不放水。</li>
-              <li>21 槽前宽后窄：先主链再备选，别名与过早收敛走硬拦、失败改槽；一套内核切简/当地繁/韩，工作台导出。</li>
+              <li>5042 个答案词里，点踩和「猜到边上」几乎无关。评分只看答案和猜测；改提示词让换种说法过关，保安和警察不能打成一个分。</li>
+              <li>每个答案 21 条提示，先写 7 条主链再补备选。别名和过早露馅用代码拦，拦不住只改那一条；简体/当地繁体/韩语同一套导出。</li>
             </ul>
           </div>
         </li>
@@ -114,8 +114,8 @@
             <h3>快速拼长图 <span>活动页滚动截图工作流</span></h3>
             <p class="chain">有序截图&ensp;→&ensp;纯视觉对齐&ensp;→&ensp;钉钉长图&ensp;·&ensp;8 组逐边合同&ensp;·&ensp;已交付</p>
             <ul>
-              <li>用 spec 钉死「不可信则竖贴标明、禁止静默错序」；主路径禁止 OCR/LLM。拼后 VLM 预填喂原生列；8 组逐边合同自动验收。</li>
-              <li>交付局域网工作台与便携包：长图与 align/stack 明细，按 9.5MB 阶梯编码，自动不够可手拼。</li>
+              <li>对齐不用 OCR 和模型，拼不准就竖贴并标明，不许悄悄排错。拼完用 VLM 填类型和日期，须喂未压矮的原列；8 组真机截图逐边对。</li>
+              <li>局域网和便携包给同事用：出长图和拼接明细，按钉钉 9.5MB 选编码，自动不够可以手拼。</li>
             </ul>
           </div>
         </li>
@@ -128,8 +128,8 @@
             <h3>会话打标 <span>检索增强分类 · 七鱼写回</span></h3>
             <p class="chain">摘要&ensp;→&ensp;检索 + 一级 Top-3&ensp;→&ensp;旁路写回&ensp;·&ensp;工单 86.2% / 74.0%&ensp;·&ensp;已交付</p>
             <ul>
-              <li>约 9.4k 条已标工单当教材，对齐 28 个一级 / 471 叶子。多轮先收成一句诉求，同一 Agent 只在树上选对，不微调、不改工单分类。</li>
-              <li>按相似工单和一级 Top-3 收窄后约束选对；票够且一级一致才写回该通咨询分类，否则复核。</li>
+              <li>用约 9.4k 条已标工单对照 28 个一级 / 471 个叶子。多轮先收成一句，Agent 只在分类树上选，不微调，也不改工单分类。</li>
+              <li>先按相似工单和一级 Top-3 收窄再选；票够且一级对上才写回七鱼，否则复核。</li>
             </ul>
           </div>
         </li>
@@ -151,7 +151,7 @@
         <a class="proj-link" href="https://github.com/CANESHUGA36/AutoForge">github.com/CANESHUGA36/AutoForge</a>
       </div>
       <p class="job-lead">
-        自然语言需求 → Architect / Sprint / Builder / Reviewer → 带构建与设计门禁的可运行 Web 应用。
+        一句话需求 → Architect / Sprint / Builder / Reviewer → 能构建、能打开的 Web 应用。
       </p>
 
       <div class="pipe" aria-label="AutoForge 流水线">
@@ -178,9 +178,9 @@
       <p class="pipe-sub">Pipeline&ensp;Build Gate · Design Lint · DevServer · Screenshot · Contract Test</p>
 
       <ul class="proj-points">
-        <li>四 Agent 分轮：工具按角色注册，运行时拒绝越权调用；按功能组从 spec 迭代，门禁不过不进入下一组。</li>
-        <li>构建与 DevServer 硬卡住；设计检查与截图存档。接 Playwright MCP 做浏览器验收，契约测试先扫 data-testid。</li>
-        <li>上下文先摘要再 checkpoint，超阈值才重置；Docker 可中断恢复，不必从头再跑。</li>
+        <li>四个 Agent 各用各的工具，调到别人的会被拒；按功能组往下做，构建不过不去下一组。</li>
+        <li>构建和开发服务器过不了就停，设计和截图只存档。浏览器用 Playwright 验，契约测试先扫 data-testid。</li>
+        <li>上下文长了先摘要，再写 checkpoint，太长才清空重来；Docker 里中断了可以接着跑。</li>
       </ul>
       <p class="stack-line">Python · Function Calling · MCP · Playwright · Docker</p>
     </section>
