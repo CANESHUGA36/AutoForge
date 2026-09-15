@@ -153,15 +153,15 @@ em {
 /* —— sections —— */
 
 .sec {
-  margin-top: 4mm;
+  margin-top: 3.6mm;
 }
 
 .sec.edu {
-  margin-top: 3.4mm;
+  margin-top: 3.1mm;
 }
 
 .sec.stack {
-  margin-top: 3.2mm;
+  margin-top: 2.8mm;
 }
 
 .sec-head {
@@ -169,7 +169,7 @@ em {
   grid-template-columns: 9mm auto 1fr;
   gap: 2.4mm;
   align-items: baseline;
-  margin-bottom: 2.6mm;
+  margin-bottom: 2.1mm;
 }
 
 .sec.edu .sec-head {
@@ -244,17 +244,17 @@ em {
 }
 
 .job-lead {
-  margin: 1.4mm 0 0;
+  margin: 1.15mm 0 0;
   color: var(--ink-2);
-  font-size: 9pt;
-  line-height: 1.45;
+  font-size: 8.85pt;
+  line-height: 1.42;
 }
 
 /* —— intern lanes —— */
 
 .lanes {
   list-style: none;
-  margin: 2.8mm 0 0 1.4mm;
+  margin: 2.3mm 0 0 1.4mm;
   padding: 0 0 0 4.4mm;
   border-left: 1pt solid var(--red);
 }
@@ -262,9 +262,9 @@ em {
 .lanes > li {
   display: grid;
   grid-template-columns: 24mm 1fr;
-  gap: 1.6mm 3.8mm;
+  gap: 1.35mm 3.8mm;
   position: relative;
-  padding: 1.4mm 0 1.45mm;
+  padding: 1.15mm 0 1.2mm;
 }
 
 .lanes > li + li {
@@ -307,10 +307,10 @@ em {
 }
 
 .lane-body h3 {
-  font-size: 9.7pt;
+  font-size: 9.5pt;
   font-weight: 500;
   letter-spacing: 0.02em;
-  line-height: 1.28;
+  line-height: 1.26;
 }
 
 .lane-body h3 span {
@@ -319,9 +319,9 @@ em {
 }
 
 .chain {
-  margin-top: 0.45mm;
+  margin-top: 0.3mm;
   font-family: var(--mono);
-  font-size: 6.5pt;
+  font-size: 6.3pt;
   color: var(--muted);
   letter-spacing: 0.01em;
 }
@@ -329,24 +329,24 @@ em {
 .lane-body ul,
 .proj-points {
   list-style: none;
-  margin-top: 0.9mm;
+  margin-top: 0.55mm;
 }
 
 .lane-body li {
   position: relative;
   padding-left: 3.6mm;
-  margin-top: 0.5mm;
-  font-size: 8.55pt;
-  line-height: 1.4;
+  margin-top: 0.38mm;
+  font-size: 8.35pt;
+  line-height: 1.36;
   color: var(--ink);
 }
 
 .proj-points li {
   position: relative;
   padding-left: 4mm;
-  margin-top: 0.55mm;
-  font-size: 8.5pt;
-  line-height: 1.42;
+  margin-top: 0.48mm;
+  font-size: 8.35pt;
+  line-height: 1.38;
   color: var(--ink);
 }
 
@@ -368,8 +368,8 @@ em {
   grid-template-columns: 1fr 6mm 1fr 6mm 1fr 6mm 1fr;
   align-items: end;
   gap: 0 0.6mm;
-  margin: 2.6mm 0 1.2mm;
-  padding-top: 2mm;
+  margin: 1.8mm 0 0.8mm;
+  padding-top: 1.5mm;
   border-top: 1.35pt solid var(--red);
 }
 
@@ -405,11 +405,11 @@ em {
 }
 
 .proj-points {
-  margin-top: 1.4mm;
+  margin-top: 1mm;
 }
 
 .stack-line {
-  margin-top: 1.3mm;
+  margin-top: 0.9mm;
   font-family: var(--mono);
   font-size: 7.1pt;
   color: var(--ink-2);
@@ -426,7 +426,7 @@ em {
   grid-template-columns: 28mm 1fr;
   gap: 3mm;
   align-items: baseline;
-  padding: 0.95mm 0;
+  padding: 0.8mm 0;
 }
 
 .stack-rows li + li {
