@@ -143,7 +143,7 @@
         <a class="proj-link" href="https://github.com/CANESHUGA36/AutoForge">github.com/CANESHUGA36/AutoForge</a>
       </div>
       <p class="job-lead">
-        一句话需求 → Architect / Sprint / Builder / Reviewer → 能构建、能打开的 Web 应用。
+        自然语言需求 → Architect / Sprint / Builder / Reviewer → 带构建与设计门禁的可运行 Web 应用。
       </p>
 
       <div class="pipe" aria-label="AutoForge 流水线">
@@ -170,9 +170,9 @@
       <p class="pipe-sub">Pipeline&ensp;Build Gate · Design Lint · DevServer · Screenshot · Contract Test</p>
 
       <ul class="proj-points">
-        <li>四个 Agent 各用各的工具，调到别人的会被拒；按功能组往下做，构建不过不去下一组。</li>
-        <li>构建和开发服务器过不了就停，设计和截图只存档。浏览器用 Playwright 验，契约测试先扫 data-testid。</li>
-        <li>上下文长了先摘要，再写 checkpoint，太长才清空重来；Docker 里中断了可以接着跑。</li>
+        <li>四 Agent 分轮：工具按角色注册，运行时拒绝越权调用；按功能组从 spec 迭代，门禁不过不进入下一组。</li>
+        <li>构建与 DevServer 硬卡住；设计检查与截图存档。接 Playwright MCP 做浏览器验收，契约测试先扫 data-testid。</li>
+        <li>上下文先摘要再 checkpoint，超阈值才重置；Docker 可中断恢复，不必从头再跑。</li>
       </ul>
       <p class="stack-line">Python · Function Calling · MCP · Playwright · Docker</p>
     </section>
