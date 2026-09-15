@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>彭杨稀 · 重庆邮电大学 · 信息工程</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=Noto+Sans+SC:wght@400;500&family=Noto+Serif+SC:wght@600;700&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!--
+    已填：姓名、电话、学历专业、英语六级、在校与实习公司/时间/职位。
+    客服组按用户稿：9.4k 对照 28 一级 / 471 二级；2.3k 测试集一级/二级 86.2% / 74.0%。
+    钉钉预警已上线：前日播报、用户反馈白名单与事故窗。
+    市场组按用户稿：剥状态栏、重复区拼接、LLM 抽规则、钉钉表字段预填（不是写表上线）。
+    Spec + 8 组合同 + coding agent 改门控；同事日常在用。可写 Cursor / AI Coding。
+    产品组按用户稿覆盖：作答反馈、Qwen/GPT/DeepSeek 成本时延指令遵循、消融/A-B、
+    大陆/海外华人配模型；三市场当地用语、BGE+同义去重、饱和地图、21 槽前宽后窄、离线网页包。
+    AutoForge：构建与 DevServer 才硬卡住；DesignLint/截图不阻断。不要写 20 文件/133 用例（本仓对不上）、不要用画板当 punchline。
+    压缩口径：摘要 → checkpoint → 超阈值重置。工具越权调用是运行时拒绝。
+    技术栈：不写题库流水线/截图拼接/索引库（正文已有）；不写 VLM。
+    LLM 带 Context Engineering；ENGINEERING 带 Spec Coding 与 Harness Engineering。
+    不写 RAG/LangGraph/LangChain/钉钉 SDK。
+  -->
+  <article class="page">
+    <header class="mast">
+      <div class="mast-left">
+        <h1>彭杨稀</h1>
+        <p class="tagline">运用 AI coding 快速打造可迭代可工程化的产品原型；<br />将 LLM/Agent 能力融入现有工作流进行提效</p>
+        <p class="contact">
+          <a href="tel:17318440736">173-1844-0736</a>
+          <i></i>
+          <a href="mailto:2292932127@qq.com">2292932127@qq.com</a>
+          <i></i>
+          <a href="https://github.com/CANESHUGA36">github.com/CANESHUGA36</a>
+        </p>
+      </div>
+      <figure class="portrait">
+        <img src="photo.jpg" alt="彭杨稀 证件照" />
+      </figure>
+    </header>
+
+    <section class="sec edu">
+      <div class="sec-head">
+        <span class="num">01</span>
+        <h2>教育</h2>
+        <span class="rule"></span>
+      </div>
+      <div class="edu-row">
+        <div class="edu-main">
+          <strong>重庆邮电大学</strong>
+          <span class="dot">·</span>
+          <span>本科</span>
+          <span class="dot">·</span>
+          <span>信息工程</span>
+          <span class="dot">·</span>
+          <span>英语六级</span>
+        </div>
+        <time>2023.09 — 2027.06</time>
+      </div>
+    </section>
+
+    <section class="sec intern">
+      <div class="sec-head">
+        <span class="num">02</span>
+        <h2>实习经历</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="job-head">
+        <div class="job-title">
+          <strong>重庆悦派对信息科技有限公司</strong>
+          <span class="role">AI 应用实习生</span>
+        </div>
+        <time>2026.06 — 2026.09</time>
+      </div>
+      <p class="job-lead">
+        密语炸弹作答评分与题库生成、活动页长图拼接、七鱼会话打标与钉钉预警。
+      </p>
+
+      <ol class="lanes">
+        <li>
+          <div class="lane-meta">
+            <span class="org">产品组</span>
+            <span class="method">PROMPT ENG</span>
+          </div>
+          <div class="lane-body">
+            <h3>密语炸弹 <span>基于 LLM 的作答评分与题库生成</span></h3>
+            <p class="chain">作答反馈&ensp;→&ensp;消融 / A-B&ensp;→&ensp;分市场提示词&ensp;·&ensp;已移交</p>
+            <ul>
+              <li>抓取线上用户作答反馈数据，识别用户情绪痛点，优化作答评分规则；对 Qwen、GPT、DeepSeek 做成本、响应时间、指令遵循调研测试，完成 prompt 编写以及消融 / A-B 测试。产出大陆 / 海外华人配套模型与提示词，通过自拟测试集与线上用户反馈验证。</li>
+              <li>针对大陆 / 海外华人 / 韩国三个市场，设计具有本地用语习惯的题库生成：对已有题库构建 BGE 语义去重与同义去重规则表；领域分类打标，向答案词生成 prompt 注入「领域饱和地图」，降低重复答案词。按线上反馈重做「1 答案词–21 提示词」规则，优化 prompt 使其「前宽后窄、逐渐收敛、互不重复」。产出新版生成工作流与离线网页包，方便同事一键操作与审阅导出。</li>
+            </ul>
+          </div>
+        </li>
+        <li>
+          <div class="lane-meta">
+            <span class="org">市场组</span>
+            <span class="method">SPEC CODING</span>
+          </div>
+          <div class="lane-body">
+            <h3>长图拼接工具 <span>活动页滚动截图工作流</span></h3>
+            <p class="chain">去栏对齐&ensp;→&ensp;拼长图&ensp;→&ensp;规则预填&ensp;·&ensp;8 组合同&ensp;·&ensp;已交付</p>
+            <ul>
+              <li>针对市场调研组同事对竞品 APP 活动页截图后使用画布手拼的效率问题，运用 AI Coding 工具开发截图拼接：剥离手机状态栏后拼接，算法识别相邻图片重复区域并拼为长图，LLM 识别活动规则，完成导入钉钉 AI 表格前的字段预填。</li>
+              <li>在 AI Coding 过程中制定算法迭代 spec 与 harness 构建门限，拿真实复杂失败案例识别，由 coding agent 做门控调整、阈值设置与分档路径构建。通过我选取的 8 组合同样张后小步 diff。目前已投入同事日常工作使用。</li>
+            </ul>
+          </div>
+        </li>
+        <li>
+          <div class="lane-meta">
+            <span class="org">客服组</span>
+            <span class="method">AGENT CLS</span>
+          </div>
+          <div class="lane-body">
+            <h3>打标 Agent <span>七鱼会话打标与钉钉预警</span></h3>
+            <p class="chain">索引 + 摘要选标&ensp;→&ensp;七鱼写回&ensp;·&ensp;86.2% / 74.0%&ensp;·&ensp;已交付</p>
+            <ul>
+              <li>为减轻客服工作量开发会话标签分类 agent。将传统机器学习与 agent 工作流结合：用 9.4k 工单对照 28 个一级 / 471 个二级标签构建索引库，BGE 与 TF-IDF 计算高置信叶子，agent 再根据用户原文摘要选择分类标签。在 2.3k 工单测试集上取得一级 / 二级 86.2% / 74.0% 准确率。</li>
+              <li>完成七鱼开放平台 API 对接、服务机器部署以及钉钉预警机器人配置，每日发送前日播报，针对用户反馈内容白名单与事故窗进行预警。</li>
+            </ul>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="sec project">
+      <div class="sec-head">
+        <span class="num">03</span>
+        <h2>个人项目</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="job-head">
+        <div class="job-title">
+          <strong>AutoForge</strong>
+          <span class="role">多 Agent 协作编排 · 2026.03 — 2026.06</span>
+        </div>
+        <a class="proj-link" href="https://github.com/CANESHUGA36/AutoForge">github.com/CANESHUGA36/AutoForge</a>
+      </div>
+      <p class="job-lead">
+        自然语言需求 → Architect / Sprint / Builder / Reviewer → 带构建与设计门禁的可运行 Web 应用。
+      </p>
+
+      <div class="pipe" aria-label="AutoForge 流水线">
+        <div class="pipe-step">
+          <b>Architect</b>
+          <span>规格与方案</span>
+        </div>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <div class="pipe-step">
+          <b>SprintMaster</b>
+          <span>任务切片</span>
+        </div>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <div class="pipe-step">
+          <b>Builder</b>
+          <span>编码 + 门禁</span>
+        </div>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <div class="pipe-step">
+          <b>Reviewer</b>
+          <span>评审回灌</span>
+        </div>
+      </div>
+      <p class="pipe-sub">Pipeline&ensp;Build Gate · Design Lint · DevServer · Screenshot · Contract Test</p>
+
+      <ul class="proj-points">
+        <li>四 Agent 分轮：工具按角色注册，运行时拒绝越权调用；按功能组从 spec 迭代，门禁不过不进入下一组。</li>
+        <li>构建与 DevServer 硬卡住；设计检查与截图存档。接 Playwright MCP 做浏览器验收，契约测试先扫 data-testid。</li>
+        <li>上下文先摘要再 checkpoint，超阈值才重置；Docker 可中断恢复，不必从头再跑。</li>
+      </ul>
+      <p class="stack-line">Python · Function Calling · MCP · Playwright · Docker</p>
+    </section>
+
+    <section class="sec stack">
+      <div class="sec-head">
+        <span class="num">04</span>
+        <h2>技术栈</h2>
+        <span class="rule"></span>
+      </div>
+      <ul class="stack-rows">
+        <li>
+          <span class="k">LLM / AGENT</span>
+          <span class="v">Prompt · Context Engineering · Guardrail · Function Calling · MCP · 多 Agent · BGE</span>
+        </li>
+        <li>
+          <span class="k">ENGINEERING</span>
+          <span class="v">Python · Docker · Git · Spec Coding · Harness Engineering · 评测回归</span>
+        </li>
+        <li>
+          <span class="k">FULLSTACK</span>
+          <span class="v">React · Vite · FastAPI · Playwright · SSE · 契约测试</span>
+        </li>
+      </ul>
+    </section>
+
+    <footer class="colophon">
+      <span>Cursor / Claude Code 写代码，spec、评测和验收我来定</span>
+    </footer>
+  </article>
+</body>
+</html>
